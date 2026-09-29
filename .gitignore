@@ -1,0 +1,10 @@
+.env
+password.txt
+credentials.txt
+.weverse_otp_session.json
+*.token
+*.cookie
+*.log
+__pycache__/
+.pytest_cache/
+.venv/

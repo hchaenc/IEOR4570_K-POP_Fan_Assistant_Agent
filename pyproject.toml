@@ -9,4 +9,17 @@ dependencies = [
     "litellm>=1.50",
     "google-cloud-aiplatform>=1.40.0",
     "requests>=2.31",
+    "python-dotenv>=1.0.1",
+    "beautifulsoup4>=4.12.3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "live_weverse: live tests against the real Weverse gateway (deselected by default)",
+    "live_ticketmaster: live tests against the real Ticketmaster Discovery API (deselected by default)",
 ]
