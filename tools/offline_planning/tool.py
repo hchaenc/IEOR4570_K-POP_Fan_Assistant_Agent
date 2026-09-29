@@ -30,10 +30,13 @@ SCHEMA = {
             "official Weverse notices (last 365 days), classifies each one "
             "(ticketed_event / popup / fan_event / merchandise / online_event / "
             "announcement), and searches Ticketmaster for the ticketed ones - "
-            "returning notice summaries, per-notice classification, and matching "
-            "Ticketmaster events with venue, public on-sale time, presale "
-            "windows, ticket limit and purchase link. Use for questions about "
-            "concerts, tours, fan meetings, pop-up stores and attending plans."
+            "returning each notice with a short evidence excerpt plus venue, "
+            "public on-sale time, presale windows, ticket limit and purchase "
+            "link. Use for questions about concerts, tours, fan meetings, "
+            "pop-up stores and attending plans. The event_type is a heuristic "
+            "pre-label: check it against the excerpt, and call "
+            "read_weverse_notice when the answer needs more of the notice than "
+            "the excerpt holds."
         ),
         "parameters": {
             "type": "object",

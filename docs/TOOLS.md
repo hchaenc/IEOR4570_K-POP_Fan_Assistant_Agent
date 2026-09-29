@@ -13,14 +13,15 @@ index.html  <-->  app.py (FastAPI /chat, LiteLLM harness, run_agent loop)
                         v
               tools/  (auto-discovering registry)
               ├── __init__.py            # scans tools/*/ for SCHEMAS + HANDLERS
-              ├── offline_planning/      # THE registered tool (one per whiteboard box)
-              │   ├── __init__.py        # SCHEMAS + HANDLERS
-              │   ├── tool.py            # argument normalization + JSON envelope
+              ├── offline_planning/      # this slice's registered tools
+              │   ├── __init__.py        # SCHEMAS + HANDLERS (two tools)
+              │   ├── tool.py            # plan_offline_attendance: args + envelope
+              │   ├── read_tool.py       # read_weverse_notice: full text on demand
               │   ├── pipeline.py        # notices -> judge -> conditional TM -> merge
-              │   ├── judge.py           # deterministic notice classifier
+              │   ├── judge.py           # tiered (title-first) notice classifier
               │   └── README.md          # full component/input/output documentation
               └── integrations/          # data-source adapters, NOT registered
-                  ├── weverse/           # signed gateway client + notice search
+                  ├── weverse/           # signed gateway client + notice search/read
                   └── ticketmaster/      # Discovery API client + event shaping
 ```
 
@@ -47,17 +48,18 @@ Handler rules:
    `{"ok": false, "error": "<stable_code>", "message": "<short, safe, actionable>"}`
    plus `"source": "<integration>"` when a specific adapter failed.
 4. Configuration via environment variables only (local `.env`, git-ignored).
-5. Trace safety: `app.safe_trace_result()` whitelists the summary keys
+5. Trace safety: `app.safe_trace_result()` whitelists the scalar summary keys
    (`ok`, `error`, `scanned_count`, `matched_count`, `notice_matched`,
-   `truncated`) shown in the chat UI; large payloads stay in the model
-   context only.
+   `truncated`, `notice_id`, `text_chars`) shown in the chat UI. Notice bodies
+   and excerpts exist only so the model can audit a label, so they are
+   deliberately excluded from the whitelist and stay in the model context.
 
 Stable error codes: `missing_credentials`, `authentication_failed`,
 `community_not_joined`, `ambiguous_artist`, `rate_limited`,
-`upstream_schema_changed`, `timeout`, `unexpected_upstream_error`, plus
-harness-level `unknown_tool` / `bad_arguments`.
+`upstream_schema_changed`, `timeout`, `unexpected_upstream_error`,
+`notice_not_found`, plus harness-level `unknown_tool` / `bad_arguments`.
 
-## 3. The offline-planning tool
+## 3. The offline-planning tools
 
 Full component/input/output documentation lives in
 [`tools/offline_planning/README.md`](../tools/offline_planning/README.md).
@@ -65,23 +67,38 @@ Summary:
 
 ```
 plan_offline_attendance(artist, city?, country_code?, notice_query?)
+read_weverse_notice(artist, notice_id, max_chars?)
 ```
 
-One call performs the pipeline:
+`plan_offline_attendance` performs the whole pipeline in one call:
 
 1. **Notices** - `integrations/weverse` fetches the artist's official Weverse
    notices (last 365 days, dynamic slug resolution, no community join needed).
    Every in-window notice reaches the judge, up to 120.
 2. **Judge** - `judge.py` labels each notice `ticketed_event` / `popup` /
-   `fan_event` / `merchandise` / `online_event` / `announcement` in a
-   priority-ordered bilingual hint scan, and decides `should_search` (ticketed
-   only).
+   `fan_event` / `merchandise` / `online_event` / `announcement` with a
+   tiered bilingual hint scan (title first, body only when the title is
+   silent) and decides `should_search` (ticketed only).
 3. **Ticketmaster** - `integrations/ticketmaster` searches Discovery once per
    unique `(keyword, city, country_code)` for ticketed notices, keeping only
    events whose headliner actually is the artist.
-4. **Merge** - one envelope: trace-safe summary keys + `notices[]` (with
-   `event_type`), `decisions[]` (the standard decision objects),
-   `ticketmaster_searched[]`, `ticketmaster_events[]`.
+4. **Merge** - one envelope: trace-safe summary keys plus `notices[]`, where
+   each notice carries its own evidence (`event_type`, `matched_signal`,
+   `matched_field`, `excerpt`), and `ticketmaster_events[]`.
+
+`read_weverse_notice` is the escalation path. The course guidance for
+search-style tools is "return titles + summaries to start... combine with a
+'read page' tool for deeper dives", so the planning envelope ships a
+signal-centered 180-character excerpt per notice and this tool returns the
+whole body (default 1500 chars, capped at 5000) when a question turns on
+detail the excerpt cannot hold. It reuses the list request, because the
+`tabContent` endpoint already returns complete bodies - there is no
+per-notice endpoint to discover.
+
+Why the classifier stays in code: it decides how Ticketmaster quota is spent,
+and it costs zero model tokens either way. Dumping all 86 aespa bodies into the
+context instead would cost ~42,000 tokens per turn, re-sent on every later
+turn of the session, and would still leave the quota decision unexplained.
 
 Known limits encoded in the system prompt and the tool docs: notices cover
 365 days; Ticketmaster publishes no price range for most K-pop events (and no
@@ -130,12 +147,16 @@ report.
 
 - The harness (`app.py`, unchanged course pattern) passes `TOOLS` to the
   model and executes requests through `run_tool`. The system prompt tells
-  the model when to call the tool and how to read the envelope
-  (`notices[]`, `decisions[]`, `ticketmaster_events[]`), to treat
-  `matched_count: 0` as an honest "not on Ticketmaster", and to attribute
-  every fact to its source URL.
+  the model that `event_type` is a heuristic pre-label it may override using
+  the excerpt, to call `read_weverse_notice` rather than guess when an answer
+  turns on detail the excerpt cannot hold (at most three notices per answer,
+  never quote a notice it did not read), to treat `matched_count: 0` as an
+  honest "not on Ticketmaster", to state a price only when one appears in text
+  it actually read, and to attribute every fact to its source URL.
 - Suggested demo questions (all verified against the live sources):
   - "What aespa tour dates are on sale in the US, and when do tickets open?"
+  - "What exactly does the aespa presale notice say about membership
+    requirements?" (drives `plan_offline_attendance` then `read_weverse_notice`)
   - "Search YOASOBI notices from the last year for pop-up events."
   - "I want to see NCT TEN live - help me plan."
   - Note: MONSTA X and ATEEZ are not usable demos - their Weverse communities

@@ -68,11 +68,12 @@ def test_live_offline_planning_envelope_yoasobi():
     assert result["ok"] is True, result
     assert result["scanned_count"] > 0
     assert result["notices"], "expected at least one in-window notice"
-    assert result["decisions"], "every notice must have a decision"
+    # every notice carries its own classification evidence, inline
     assert all(
-        set(d) == {"notice_id", "title", "event_type", "matched_signal", "ticketmaster_search"}
-        for d in result["decisions"]
+        {"event_type", "matched_signal", "matched_field", "excerpt", "ticket_relevant"} <= set(n)
+        for n in result["notices"]
     )
+    assert "decisions" not in result
     # trace-safe summary keys present for the UI whitelist
     assert {"ok", "scanned_count", "matched_count", "truncated"} <= set(result)
     print("\nlive yoasobi pipeline:")
@@ -81,6 +82,30 @@ def test_live_offline_planning_envelope_yoasobi():
     print("  ticketmaster searched:", result["ticketmaster_searched"], "| events:", result["matched_count"])
     for event in result["ticketmaster_events"][:3]:
         print("  *", event["date"], event["name"][:48], "|", event.get("city"))
+
+
+@pytest.mark.live_weverse
+def test_live_read_notice_after_planning():
+    """The full chain the two tools exist for: plan, then read one notice."""
+    _require_credentials()
+    plan = json.loads(run_tool("plan_offline_attendance", {"artist": "aespa"}))
+    assert plan["ok"] is True
+    target = plan["notices"][0]
+
+    read = json.loads(
+        run_tool("read_weverse_notice", {"artist": "aespa", "notice_id": target["notice_id"]})
+    )
+    assert read["ok"] is True, read
+    assert read["notice_id"] == target["notice_id"]
+    assert read["text"] and "<" not in read["text"]
+    # the trace must not carry the body it just fetched
+    assert app.safe_trace_result(json.dumps(read)) == {
+        "ok": True,
+        "truncated": read["truncated"],
+        "notice_id": read["notice_id"],
+        "text_chars": read["text_chars"],
+    }
+    print(f"\nlive read notice: {read['title'][:48]} | {read['text_chars']} chars, truncated={read['truncated']}")
 
 
 @pytest.mark.live_weverse

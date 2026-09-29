@@ -21,6 +21,10 @@ LOOKBACK_DAYS = 365
 NOTICE_SCAN_LIMIT = 300
 REQUEST_TIMEOUT_SECONDS = 120
 MAX_RETURNED_RESULTS = 10
+# The read tool's text budget: the model asks for detail, but whatever it
+# reads is re-sent on every later turn of the session, so keep it bounded.
+DEFAULT_READ_CHARS = 1500
+MAX_READ_CHARS = 5000
 
 
 class NoticeRecord(BaseModel):
@@ -234,3 +238,86 @@ class WeverseNoticeService:
             "truncated": truncated,
             "results": [record.model_dump(mode="json") for record in shown],
         }
+
+    # -- single-notice retrieval (progressive disclosure) ------------------------
+
+    def read_notice(
+        self,
+        artist: str,
+        notice_id: str,
+        max_chars: int | None = DEFAULT_READ_CHARS,
+    ) -> dict:
+        """Return the text of one notice the model saw in a previous notices[] list.
+
+        The list endpoint already carries complete bodies, so this reuses that
+        request rather than hunting for a per-notice endpoint.
+        """
+        if not isinstance(artist, str) or not artist.strip():
+            return _error("ambiguous_artist", "A single artist or community URL name is required.")
+        if not isinstance(notice_id, str) or not notice_id.strip():
+            return _error(
+                "notice_not_found",
+                "A notice_id string is required, taken verbatim from a notices[] result.",
+            )
+        try:
+            budget = int(DEFAULT_READ_CHARS if max_chars is None else max_chars)
+        except (TypeError, ValueError):
+            budget = DEFAULT_READ_CHARS
+        budget = max(1, min(budget, MAX_READ_CHARS))
+
+        try:
+            with self._lock:
+                return self._read_locked(artist.strip(), notice_id.strip(), budget)
+        except GatewayError as exc:
+            return _error(exc.code, exc.message)
+
+    def _read_locked(self, artist: str, notice_id: str, budget: int) -> dict:
+        deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
+        community = self._resolve_community(artist, deadline)
+        page = self._fetch_notices(community["community_id"], deadline)
+        url_base = f"https://weverse.io/{community['url_path']}/notice/"
+
+        for item in page["items"]:
+            if not isinstance(item, dict) or str(item.get("noticeId")) != notice_id:
+                continue
+            text = html_to_text(str(item.get("body") or ""))
+            try:
+                published_at: str | None = epoch_ms_to_utc(item.get("publishAt")).isoformat()
+            except ValueError:
+                published_at = None
+            return {
+                "ok": True,
+                "artist": artist,
+                "notice_id": notice_id,
+                "title": str(item.get("title") or ""),
+                "published_at": published_at,
+                "url": str(item.get("shareUrl") or (url_base + notice_id)),
+                "text": text[:budget],
+                "text_chars": len(text),
+                "truncated": len(text) > budget,
+            }
+
+        return _error(
+            "notice_not_found",
+            f"No notice with id {notice_id} in this artist's recent Weverse feed. "
+            "Check the notice_id against the notices[] list; do not retry.",
+        )
+
+
+_shared_service: WeverseNoticeService | None = None
+_shared_lock = threading.Lock()
+
+
+def get_notice_service() -> WeverseNoticeService:
+    """One lazily created service per process.
+
+    Both offline-planning tools share it so the rotated access token stays in
+    memory; a fresh client per call would restart from the stale .env token and
+    pay a 401-plus-refresh cycle every time.
+    """
+    global _shared_service
+    if _shared_service is None:
+        with _shared_lock:
+            if _shared_service is None:
+                _shared_service = WeverseNoticeService()
+    return _shared_service

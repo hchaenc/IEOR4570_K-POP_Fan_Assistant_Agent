@@ -39,17 +39,27 @@ SYSTEM_PROMPT = (
     "concise clarification question if the artist is missing. Never invent "
     "notice content, dates, availability, or source URLs.\n"
     "\n"
-    "Interpret the tool envelope: notices[] are official announcements "
+    "Interpret the tool envelope: notices[] are official announcements, each "
     "labeled ticketed_event (seats to buy), popup, fan_event (attendance by "
     "membership application rather than purchase), merchandise, online_event "
-    "(streamed, so nothing to travel to), or announcement; decisions[] record "
-    "which signal produced each label; ticketmaster_events[] lists venues "
-    "with attractions (the headliners), public_on_sale_at, presale_windows, "
+    "(streamed, so nothing to travel to), or announcement. That label is a "
+    "heuristic pre-label: matched_signal and matched_field say which word in "
+    "which field produced it, and excerpt shows the text itself. When an "
+    "excerpt contradicts its label, trust the excerpt, name the notice, and "
+    "answer from the text. ticketmaster_events[] lists venues with "
+    "attractions (the headliners), public_on_sale_at, presale_windows, "
     "ticket_limit and a purchase link.\n"
+    "\n"
+    "Call read_weverse_notice(artist, notice_id) instead of guessing whenever "
+    "an answer turns on detail the excerpt cannot hold - exact dates and "
+    "times, application windows, membership requirements, or a sale channel. "
+    "Copy notice_id verbatim from notices[], read at most three notices per "
+    "answer, and never quote the text of a notice you did not read.\n"
     "\n"
     "Prices: price_min and price_max are null for most K-pop events because "
     "Ticketmaster publishes price ranges for only some events. When they are "
-    "null, point to the event link instead of stating or estimating a number. "
+    "null, point to the event link instead of stating or estimating a number; "
+    "quote a price only if one appears in notice text you actually read. "
     "matched_count 0 means the event is genuinely not on Ticketmaster - say "
     "so honestly and prefer the sale channel named in the notice. A "
     "ticketmaster_error means Ticketmaster was unavailable while the notices "
@@ -64,7 +74,18 @@ MAX_TOOL_ROUNDS = 5
 
 # --- The Harness ---
 
-TRACE_ALLOWED_KEYS = ("ok", "error", "scanned_count", "matched_count", "notice_matched", "truncated")
+# Scalar summary keys only: `text` and `excerpt` exist precisely so the model
+# can audit a label, and they must never reach the visible trace.
+TRACE_ALLOWED_KEYS = (
+    "ok",
+    "error",
+    "scanned_count",
+    "matched_count",
+    "notice_matched",
+    "truncated",
+    "notice_id",
+    "text_chars",
+)
 
 
 def safe_trace_result(result: str) -> dict:

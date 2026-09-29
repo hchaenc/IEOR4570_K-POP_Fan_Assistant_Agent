@@ -9,8 +9,10 @@ multi-tool calls for this slice.
 
 from __future__ import annotations
 
+import re
+
 from tools.integrations.ticketmaster.service import EventSearchClient, TicketmasterError, extract_events
-from tools.integrations.weverse.notices import WeverseNoticeService
+from tools.integrations.weverse.notices import WeverseNoticeService, get_notice_service
 
 from .judge import classify_notices, ticketed_decisions
 
@@ -18,10 +20,35 @@ from .judge import classify_notices, ticketed_decisions
 # cap the standalone notice search uses. Bounded so a very noisy community
 # cannot flood the model context with titles.
 PLANNING_NOTICE_LIMIT = 120
+EXCERPT_MAX_CHARS = 180
+BODY_WINDOW_CHARS = 80
 
 
 def _error(code: str, message: str, source: str) -> dict:
     return {"ok": False, "error": code, "message": message, "source": source}
+
+
+def _excerpt(text: str, signal: str | None, matched_field: str | None) -> str:
+    """Evidence for the label, so the model can audit or override it.
+
+    When the body decided the label the excerpt is centered on the matched
+    signal: a head excerpt of an 8,000-character notice is greeting
+    boilerplate and proves nothing about the classification.
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+    if matched_field == "body" and signal:
+        hit = re.search(re.escape(signal), text, re.IGNORECASE)
+        if hit:
+            start = max(0, hit.start() - BODY_WINDOW_CHARS)
+            end = min(len(text), hit.end() + BODY_WINDOW_CHARS)
+            return (
+                ("…" if start > 0 else "")
+                + text[start:end].strip()
+                + ("…" if end < len(text) else "")
+            )
+    return text[:EXCERPT_MAX_CHARS] + ("…" if len(text) > EXCERPT_MAX_CHARS else "")
 
 
 def plan_offline_attendance(
@@ -40,10 +67,13 @@ def plan_offline_attendance(
     inside an otherwise successful envelope, because the official notice is
     what tells a fan where to buy when the artist sells off Ticketmaster.
     Success envelopes carry trace-safe summary keys (scanned_count /
-    matched_count / truncated) plus full payloads under notices / decisions /
-    ticketmaster_events.
+    matched_count / notice_matched / truncated) plus payloads under notices /
+    ticketmaster_events. Each notice carries its own classification evidence
+    (`event_type`, `matched_signal`, `matched_field`, `excerpt`); the separate
+    `decisions[]` array was removed because it duplicated every title and
+    spent ~6,400 tokens to say nothing new.
     """
-    notices = (notice_service or WeverseNoticeService()).search_notices(
+    notices = (notice_service or get_notice_service()).search_notices(
         artist, query=notice_query, limit=PLANNING_NOTICE_LIMIT
     )
     if not notices.get("ok"):
@@ -60,6 +90,15 @@ def plan_offline_attendance(
                 "published_at": notice.get("published_at"),
                 "url": notice.get("url"),
                 "event_type": decision["event_type"],
+                # The label plus why it was assigned, so the model can check
+                # the classifier's work instead of trusting it blindly.
+                "matched_signal": decision["matched_signal"],
+                "matched_field": decision["matched_field"],
+                "excerpt": _excerpt(
+                    str(notice.get("text") or ""),
+                    decision["matched_signal"],
+                    decision["matched_field"],
+                ),
                 "ticket_relevant": decision["ticketmaster_search"]["should_search"],
             }
         )
@@ -97,7 +136,6 @@ def plan_offline_attendance(
         "notice_matched": notices.get("matched_count", len(notice_results)),
         "notice_count": len(annotated_notices),
         "notices": annotated_notices,
-        "decisions": decisions,
         "ticketmaster_searched": searched,
         "ticketmaster_events": ticketmaster_events,
     }

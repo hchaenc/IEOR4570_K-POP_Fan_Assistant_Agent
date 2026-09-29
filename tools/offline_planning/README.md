@@ -1,10 +1,11 @@
-# offline_planning — the offline event-planning tool
+# offline_planning — the offline event-planning tools
 
-One model-callable tool that packages the whole offline-planning slice:
-official Weverse notices, per-notice event classification, and conditional
-Ticketmaster event search with on-sale times, presale windows and ticket
-limits. It matches the project architecture where "offline planning" is a
-single tool backed by several data sources.
+Two model-callable tools that package the whole offline-planning slice:
+`plan_offline_attendance` fetches official Weverse notices, classifies them
+and conditionally searches Ticketmaster; `read_weverse_notice` returns the
+full text of any notice the first tool listed. Together they implement
+progressive disclosure - a compact digest with evidence per notice, and an
+escalation path when the digest is not enough.
 
 ```
 model call: plan_offline_attendance(artist, city?, country_code?, notice_query?)
@@ -16,7 +17,12 @@ model call: plan_offline_attendance(artist, city?, country_code?, notice_query?)
                 |                    ├── integrations/weverse      (notices)
                 |                    └── integrations/ticketmaster (events)
                 v
-        one merged JSON envelope back to the LLM
+        one merged JSON envelope, each notice carrying its own evidence
+                |
+                v   (only when the excerpt is not enough)
+model call: read_weverse_notice(artist, notice_id, max_chars?)
+                ->  read_tool.py  ->  integrations/weverse.read_notice()
+                ->  one notice's full text
 ```
 
 ## Components
@@ -25,16 +31,25 @@ model call: plan_offline_attendance(artist, city?, country_code?, notice_query?)
 |---|---|---|---|
 | `__init__.py` | Registry contract: exposes `SCHEMAS` (model-facing schema list) and `HANDLERS` (name -> handler). The `tools/` registry auto-discovers them; no shared file edits needed. | - | - |
 | `tool.py` | `plan_offline_attendance_tool`: validates/normalizes arguments, calls the pipeline, serializes the result dict to a JSON string for the tool loop. | tool arguments (see below) | JSON string of the result envelope |
-| `pipeline.py` | Orchestrator `plan_offline_attendance`: (1) fetch every in-window notice, (2) classify them, (3) search Ticketmaster once per unique ticketed keyword, (4) merge into one envelope with trace-safe summary keys; a Ticketmaster failure is reported inside a successful envelope instead of discarding the notices. | artist, city, country_code, notice_query + optional injected `notice_service` / `event_client` (for tests) | result dict (envelopes below) |
-| `judge.py` | Deterministic, priority-ordered bilingual classifier implementing the decision protocol in `docs/TOOLS.md`: labels each notice `ticketed_event` / `popup` / `fan_event` / `merchandise` / `online_event` / `announcement`, records the hint that fired, decides `should_search`, and de-duplicates Ticketmaster search arguments. | notice dict / notice list + geo filters | decision dicts (`classify_notice`, `classify_notices`, `ticketed_decisions`) |
-| `../integrations/weverse/` | Data-source adapter (NOT a registered tool): signed Weverse gateway client (`client.py`: tokens, auto-refresh) + notice search (`notices.py`: `search_notices`). | artist, query | `search_notices` result dict |
+| `read_tool.py` | `read_weverse_notice_tool`: the escalation path - returns one notice's full text (default 1500 chars, capped at 5000) for a `notice_id` copied from a previous envelope. | artist, notice_id, max_chars | JSON string of the read envelope |
+| `pipeline.py` | Orchestrator `plan_offline_attendance`: (1) fetch every in-window notice, (2) classify them, (3) search Ticketmaster once per unique ticketed keyword, (4) merge into one envelope with trace-safe summary keys; a Ticketmaster failure is reported inside a successful envelope instead of discarding the notices. Also builds each notice's evidence `excerpt`. | artist, city, country_code, notice_query + optional injected `notice_service` / `event_client` (for tests) | result dict (envelopes below) |
+| `judge.py` | Deterministic, **tiered** bilingual classifier implementing the decision protocol in `docs/TOOLS.md`: the title decides, the body is consulted only when the title carries no signal. Labels each notice `ticketed_event` / `popup` / `fan_event` / `merchandise` / `online_event` / `announcement`, records the hint and which field matched it, decides `should_search`, and de-duplicates Ticketmaster search arguments. | notice dict / notice list + geo filters | decision dicts (`classify_notice`, `classify_notices`, `ticketed_decisions`) |
+| `../integrations/weverse/` | Data-source adapter (NOT a registered tool): signed Weverse gateway client (`client.py`: tokens, auto-refresh) + notice search and single-notice read (`notices.py`: `search_notices`, `read_notice`, `get_notice_service`). | artist, query, notice_id | result dict |
 | `../integrations/ticketmaster/` | Data-source adapter (NOT a registered tool): Discovery API client (`service.py`: `EventSearchClient.search_events`, in-process cache) + event shaping (`extract_events`). | keyword, city, country_code | raw Discovery dict / shaped event list |
 
-The classifier is a deterministic pre-filter. The LLM still receives every
-notice and both sources' data, so it makes the final judgment when writing
-the answer; the pipeline only decides where to spend Ticketmaster quota.
+`get_notice_service()` returns one lazily shared service per process, so both
+tools reuse the same authenticated client instead of paying a 401-plus-refresh
+cycle on every call.
+
+The classifier is a deterministic pre-filter, not an oracle. Every label ships
+with the word that produced it (`matched_signal`), which field it came from
+(`matched_field`) and the text around it (`excerpt`), so the LLM can disagree
+using evidence it can actually read. The pipeline only decides where to spend
+Ticketmaster quota.
 
 ## Tool input (model-facing)
+
+`plan_offline_attendance`:
 
 | Argument | Type | Required | Meaning |
 |---|---|---|---|
@@ -42,6 +57,14 @@ the answer; the pipeline only decides where to spend Ticketmaster quota.
 | `city` | string \| null | no | Ticketmaster city filter, e.g. `"New York"` |
 | `country_code` | string \| null | no | Ticketmaster ISO country filter, default `"US"` |
 | `notice_query` | string \| null | no | Keyword filter for notices, e.g. `"ticket"` |
+
+`read_weverse_notice`:
+
+| Argument | Type | Required | Meaning |
+|---|---|---|---|
+| `artist` | string | yes | The same artist value used in the planning call |
+| `notice_id` | string | yes | Copied verbatim from `notices[]`; never invented |
+| `max_chars` | integer \| null | no | Text budget, default 1500, capped at 5000 |
 
 ## Tool output (JSON envelope)
 
@@ -63,21 +86,10 @@ Success:
       "published_at": "2026-04-21T04:00:00+00:00",
       "url": "https://weverse.io/aespa/notice/36316",
       "event_type": "ticketed_event",
+      "matched_signal": "tour",
+      "matched_field": "title",
+      "excerpt": "Hello. We are aespa. 2026-27 aespa LIVE TOUR ...",
       "ticket_relevant": true
-    }
-  ],
-  "decisions": [
-    {
-      "notice_id": "36316",
-      "title": "[NOTICE] 2026-27 aespa LIVE TOUR Announcement",
-      "event_type": "ticketed_event",
-      "matched_signal": "ticket",
-      "ticketmaster_search": {
-        "should_search": true,
-        "keyword": "aespa",
-        "city": null,
-        "country_code": "US"
-      }
     }
   ],
   "ticketmaster_searched": ["aespa"],
@@ -109,12 +121,36 @@ Success:
 }
 ```
 
+`read_weverse_notice` success:
+
+```json
+{
+  "ok": true,
+  "artist": "aespa",
+  "notice_id": "35315",
+  "title": "[NOTICE/REVISED] 2026-27 aespa LIVE TOUR - SYNK : COMPLaeXITY- US/CA Membership (GL) Pre-Sale",
+  "published_at": "2026-04-27T05:00:00+00:00",
+  "url": "https://weverse.io/aespa/notice/35315",
+  "text": "Hello. This is the notice body, HTML stripped, plain text only…",
+  "text_chars": 4210,
+  "truncated": true
+}
+```
+
 Field notes:
 
 - Trace-safe summary keys (`ok`, `scanned_count`, `matched_count`,
-  `notice_matched`, `truncated`) are what the chat UI shows; the large payload
-  keys (`notices`, `decisions`, `ticketmaster_events`) stay in the model
-  context but out of the visible trace.
+  `notice_matched`, `truncated`, `notice_id`, `text_chars`) are what the chat
+  UI shows. `text` and `excerpt` are deliberately **not** whitelisted: they
+  exist so the model can audit a label, not to be echoed in the interface.
+- Every notice carries why it was labeled: `matched_signal` (the word that
+  fired), `matched_field` (`"title"`, `"body"`, or `null`) and `excerpt`. When
+  the body decided the label the excerpt is centered on the matched signal
+  (±80 chars) rather than the head of the notice, because a head excerpt of an
+  8,000-character notice is greeting boilerplate and proves nothing.
+- Removing the duplicated `decisions[]` array paid for the excerpts: the aespa
+  envelope went from 47,387 characters with zero body text to 45,515
+  characters carrying 86 excerpts.
 - `matched_count` = number of Ticketmaster events matched across all
   ticketed notices (de-duplicated by search arguments). `notice_matched` =
   how many in-window notices matched the query, so "read 86 notices, found 4
@@ -174,14 +210,14 @@ failing data source:
 
 Error codes: `missing_credentials`, `authentication_failed`,
 `community_not_joined`, `ambiguous_artist`, `rate_limited`,
-`upstream_schema_changed`, `timeout`, `unexpected_upstream_error` (plus
-harness-level `unknown_tool` / `bad_arguments`), with `source` set to
-`weverse` or `ticketmaster`.
+`upstream_schema_changed`, `timeout`, `unexpected_upstream_error`,
+`notice_not_found` (plus harness-level `unknown_tool` / `bad_arguments`), with
+`source` set to `weverse` or `ticketmaster`.
 
 ## Classification rules (`judge.py`)
 
-Each notice gets one `event_type` from a priority-ordered, bilingual hint
-scan, and only `ticketed_event` spends Ticketmaster quota.
+Each notice gets one `event_type` from a **tiered**, bilingual hint scan, and
+only `ticketed_event` spends Ticketmaster quota.
 
 | Order | Label | Meaning | Ticketmaster |
 |---|---|---|---|
@@ -192,20 +228,37 @@ scan, and only `ticketed_event` spends Ticketmaster quota.
 | 5 | `ticketed_event` | seats to buy | **yes** |
 | 6 | `announcement` | everything else | no |
 
-Priority is the whole point. Most Weverse notices are Korean, and a Korean
-broadcast pre-recording notice (`사전녹화 ... 참여 안내`) mentions tickets and
-reservation in its boilerplate, while a tour merchandise notice contains
-"tour" and an online streaming notice contains "ticket". Testing ticket hints
-first would send all of them to Ticketmaster and match nothing. It also means
-a hint list cannot simply grow: `생방송` ("live broadcast") had to be dropped
-from the online hints because nine in-person pre-recording notices were
-labeled online_event by it.
+Two tiers, in this order:
 
-Live effect on aespa's 86 in-window notices: 18 used to be labeled
-`ticketed_event` (11 wasted Ticketmaster searches); now 8 are, with the rest
-landing on `announcement` 36, `merchandise` 14, `fan_event` 13,
-`online_event` 10, `popup` 5. Tune the hint lists in `judge.py` only, and
-re-check the mix against a live artist before trusting a change.
+1. **The title decides.** Agency titles are written to be self-describing
+   (`Ticket Reservation & Admission Instructions`, `사전녹화 참여 안내`).
+2. **The body is consulted only when the title carried no signal**, and with a
+   deliberately narrower hint list.
+
+Both tiers use the same ladder above, evaluated in order, so a body hit on
+`online_event` still outranks `ticketed_event`.
+
+Why the split rather than one scan over title+body: bodies are long and full of
+boilerplate. Scanning them together made a BTS legal-action notice look
+ticketed because it mentions "ticket", and demoted aespa's real `Ticket
+Reservation & Admission` notice to `online_event` because its body offers a
+streamed alternative. Scanning titles only would miss the cases where the type
+appears nowhere in the title (lightstick sales, streamed birthday parties).
+`TICKETED_BODY_HINTS` therefore drops the generic English words (`tour`,
+`concert`, `ticket`) that the title tier can safely use, and `생방송` is allowed
+in the body tier only because pre-recording notices are caught by their titles
+first.
+
+Live effect on aespa's 86 in-window notices: 45 labels came from the title, 6
+from the body, 35 stayed `announcement`. Mix: `announcement` 35,
+`merchandise` 14, `ticketed_event` 10, `fan_event` 13, `online_event` 9,
+`popup` 5. Before tiering, 18 were labeled `ticketed_event` (11 wasted
+Ticketmaster searches) and 8 after the first priority fix. On BTS's 209
+notices, the body tier recovered 14 labels including the whole `BTS THE CITY
+ARIRANG` pop-up series, whose titles carry no type word.
+
+Tune the hint lists in `judge.py` only, and re-check the mix against a live
+artist before trusting a change.
 
 ## Environment
 

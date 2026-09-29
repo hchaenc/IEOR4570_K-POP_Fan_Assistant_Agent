@@ -12,6 +12,7 @@ from tools.integrations.ticketmaster.service import EventSearchClient
 from tools.integrations.weverse.notices import MAX_RETURNED_RESULTS, WeverseNoticeService
 from tools.offline_planning.judge import classify_notices, classify_notice, ticketed_decisions
 from tools.offline_planning.pipeline import PLANNING_NOTICE_LIMIT, plan_offline_attendance
+from tools.offline_planning.read_tool import read_weverse_notice_tool
 from tools.offline_planning.tool import plan_offline_attendance_tool
 
 TICKETED_NOTICE = {
@@ -116,8 +117,63 @@ def test_judge_deduplicates_ticketmaster_search_arguments():
 
 def test_classify_notice_keeps_standard_decision_shape():
     decision = classify_notices([TICKETED_NOTICE])[0]
-    assert set(decision) == {"notice_id", "title", "event_type", "matched_signal", "ticketmaster_search"}
+    assert set(decision) == {
+        "notice_id",
+        "title",
+        "event_type",
+        "matched_signal",
+        "matched_field",
+        "ticketmaster_search",
+    }
     assert set(decision["ticketmaster_search"]) == {"should_search", "keyword", "city", "country_code"}
+
+
+def test_title_decides_and_body_boilerplate_cannot_overrule_it():
+    """The aespa "Ticket Reservation & Admission" case.
+
+    Its body offers a streamed alternative, so a combined scan demoted a real
+    ticketed event to online_event.
+    """
+    notice = dict(
+        TICKETED_NOTICE,
+        notice_id="300",
+        title="[NOTICE] “-SYNK : COMPLaeXITY-” Ticket Reservation & Admission Instructions",
+        text="Seating opens at 6 PM. Those unable to attend may buy an online streaming ticket.",
+    )
+    decision = classify_notice(notice)
+    assert decision["event_type"] == "ticketed_event"
+    assert decision["matched_field"] == "title"
+    assert decision["ticketmaster_search"]["should_search"] is True
+
+
+def test_body_tier_decides_only_when_the_title_carries_no_signal():
+    lightstick = dict(
+        TICKETED_NOTICE,
+        notice_id="301",
+        title="[알림] aespa FANLIGHT EMBLEM- ONLINE SALES DETAILS",
+        text="Sales details for the official merchandise below.",
+    )
+    decision = classify_notice(lightstick)
+    assert decision["event_type"] == "merchandise"
+    assert decision["matched_field"] == "body"
+    assert decision["matched_signal"] == "merchandise"
+
+
+def test_body_tier_ignores_generic_ticket_wording():
+    """A legal-action notice mentions tickets; that must not look ticketed."""
+    legal = dict(
+        TICKETED_NOTICE,
+        notice_id="302",
+        title="[NOTICE] Update Notice on Legal Proceedings Against Violation of Artist Rights",
+        text=(
+            "We regularly take legal action against activities that infringe upon the "
+            "artist's rights, including tickets resold above face value."
+        ),
+    )
+    decision = classify_notice(legal)
+    assert decision["event_type"] == "announcement"
+    assert decision["matched_field"] is None
+    assert decision["ticketmaster_search"]["should_search"] is False
 
 
 def test_judge_routes_streaming_and_merch_away_from_ticketmaster():
@@ -220,6 +276,47 @@ def test_pipeline_popup_only_never_calls_ticketmaster():
     assert events.calls == []
 
 
+def test_notice_carries_evidence_and_the_duplicated_decisions_array_is_gone():
+    long_body = "Hello, thank you for your support. " * 30 + "Official merchandise sales open Friday."
+    goods = dict(TICKETED_NOTICE, notice_id="400", title="Sales information", text=long_body)
+    result = plan_offline_attendance(
+        "yoasobi",
+        notice_service=FakeNoticeService(notice_success([goods])),
+        event_client=FakeEventClient(),
+    )
+    assert "decisions" not in result, "titles must not be serialized twice"
+    entry = result["notices"][0]
+    assert entry["event_type"] == "merchandise" and entry["matched_field"] == "body"
+    # Centered on the signal: a head excerpt of this body is greeting boilerplate
+    # and would not justify the label at all.
+    assert "merchandise" in entry["excerpt"]
+    assert len(entry["excerpt"]) <= 200
+
+
+def test_excerpt_for_a_title_match_is_the_head_of_the_body():
+    result = plan_offline_attendance(
+        "monsta x",
+        notice_service=FakeNoticeService(notice_success([TICKETED_NOTICE])),
+        event_client=FakeEventClient(),
+    )
+    assert result["notices"][0]["excerpt"].startswith("The world tour tickets")
+
+
+def test_envelope_is_smaller_than_the_evidence_free_version_it_replaced():
+    """47,387 chars was the measured size of the aespa envelope with no body text.
+
+    The same call now carries an excerpt per notice and must still cost less,
+    which is the whole point of dropping the duplicated decisions array.
+    """
+    feed = [dict(TICKETED_NOTICE, notice_id=str(500 + i), text="body text. " * 400) for i in range(86)]
+    result = plan_offline_attendance(
+        "aespa",
+        notice_service=FakeNoticeService(notice_success(feed)),
+        event_client=FakeEventClient(),
+    )
+    assert len(json.dumps(result, ensure_ascii=False)) < 47_387
+
+
 def test_pipeline_notice_failure_fails_with_source():
     notices = FakeNoticeService({"ok": False, "error": "authentication_failed", "message": "denied"})
     result = plan_offline_attendance("yoasobi", notice_service=notices, event_client=FakeEventClient())
@@ -273,13 +370,24 @@ def test_tool_wrapper_normalizes_arguments(monkeypatch):
     assert seen["country_code"] == "US"  # uppercased
 
 
-def test_registry_exposes_single_offline_planning_tool():
+def test_registry_exposes_both_offline_planning_tools():
     names = sorted(tool["function"]["name"] for tool in TOOLS)
-    assert names == ["plan_offline_attendance"]
+    assert names == ["plan_offline_attendance", "read_weverse_notice"]
     assert TOOL_MAP["plan_offline_attendance"] is plan_offline_attendance_tool
-    schema = TOOLS[0]["function"]["parameters"]
-    assert schema["required"] == ["artist"]
-    assert set(schema["properties"]) == {"artist", "city", "country_code", "notice_query"}
+    assert TOOL_MAP["read_weverse_notice"] is read_weverse_notice_tool
+
+    plan_schema = TOOLS[0]["function"]["parameters"]
+    assert plan_schema["required"] == ["artist"]
+    assert set(plan_schema["properties"]) == {"artist", "city", "country_code", "notice_query"}
+
+    read_schema = TOOLS[1]["function"]["parameters"]
+    assert read_schema["required"] == ["artist", "notice_id"]
+    assert set(read_schema["properties"]) == {"artist", "notice_id", "max_chars"}
+
+
+def test_read_tool_rejects_missing_arguments_without_raising():
+    assert json.loads(run_tool("read_weverse_notice", {}))["error"] == "bad_arguments"
+    assert json.loads(run_tool("read_weverse_notice", {"artist": "aespa"}))["error"] == "bad_arguments"
 
 
 def test_run_tool_envelopes_for_offline_planning(monkeypatch):

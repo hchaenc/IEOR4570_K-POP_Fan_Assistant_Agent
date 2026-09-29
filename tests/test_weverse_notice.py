@@ -17,6 +17,8 @@ import tools.integrations.weverse.notices as weverse_notice_module
 from tools import TOOL_MAP, TOOLS, run_tool
 from tools.integrations.weverse.client import GatewayError, WeverseGatewayClient, sign_request
 from tools.integrations.weverse.notices import (
+    DEFAULT_READ_CHARS,
+    MAX_READ_CHARS,
     MAX_RETURNED_RESULTS,
     WeverseNoticeService,
     html_to_text,
@@ -457,6 +459,55 @@ def test_signed_request_includes_signature_params():
 
 def test_weverse_integration_is_not_registered_as_a_tool():
     # Data-source adapters must stay out of the model-facing registry; the
-    # single offline-planning tool composes them instead.
+    # offline-planning tools compose them instead.
     assert "search_weverse_notices" not in TOOL_MAP
     assert "plan_offline_attendance" in TOOL_MAP
+
+
+# --- progressive disclosure: read one notice in full -----------------------------
+
+
+def test_read_notice_returns_the_full_text():
+    body = "<p>Hello.</p><img src='x.png'><script>track()</script><p>Application opens 6 May, 10:00 KST.</p>"
+    items = [make_notice(11, "Presale", body, RECENT_MS), make_notice(12, "Other", "<p>b</p>", RECENT_MS)]
+    result = make_service(notices_block(items)).read_notice("yoasobi", "11")
+
+    assert result["ok"] is True
+    assert result["notice_id"] == "11" and result["title"] == "Presale"
+    assert "Application opens 6 May, 10:00 KST." in result["text"]
+    assert "<" not in result["text"] and "track" not in result["text"]
+    assert result["url"] == "https://weverse.io/yoasobi/notice/11"
+    assert result["truncated"] is False and result["text_chars"] == len(result["text"])
+
+
+def test_read_notice_truncates_but_reports_the_real_length():
+    long_body = "sentence after sentence. " * 200
+    service = make_service(notices_block([make_notice(21, "T", long_body, RECENT_MS)]))
+
+    result = service.read_notice("yoasobi", "21", max_chars=500)
+    assert len(result["text"]) == 500
+    assert result["truncated"] is True
+    assert result["text_chars"] > 500
+
+    capped = service.read_notice("yoasobi", "21", max_chars=999_999)
+    assert len(capped["text"]) <= MAX_READ_CHARS
+
+
+def test_read_notice_default_budget_applies_when_max_chars_is_missing():
+    long_body = "word " * 2000
+    service = make_service(notices_block([make_notice(22, "T", long_body, RECENT_MS)]))
+
+    assert len(service.read_notice("yoasobi", "22", max_chars=None)["text"]) == DEFAULT_READ_CHARS
+
+
+def test_read_notice_unknown_id_is_a_structured_error():
+    service = make_service(notices_block([make_notice(31, "T", "b", RECENT_MS)]))
+    result = service.read_notice("yoasobi", "999")
+
+    assert result["ok"] is False and result["error"] == "notice_not_found"
+    assert "do not retry" in result["message"]
+
+
+def test_read_notice_requires_a_notice_id():
+    result = make_service(notices_block([])).read_notice("yoasobi", "  ")
+    assert result["ok"] is False and result["error"] == "notice_not_found"
