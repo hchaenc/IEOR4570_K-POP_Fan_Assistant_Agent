@@ -26,7 +26,8 @@ Rules every original tool follows:
 4. **Stable error codes only:** `missing_credentials`, `authentication_failed`,
    `community_not_joined`, `ambiguous_artist`, `rate_limited`,
    `upstream_schema_changed`, `timeout`, `notice_not_found`,
-   `unexpected_upstream_error`.
+   `unexpected_upstream_error`, `no_results`, `too_few_comparables`,
+   `venue_not_found`.
 5. **Configuration comes from environment variables** in the git-ignored
    `.env`; never accept credentials as tool arguments and never return tokens,
    headers or raw exceptions.
@@ -34,7 +35,7 @@ Rules every original tool follows:
    for, when to call it and when not to, and the format of each argument.
    Error messages are prompt engineering — tell the model what to do next.
 
-Shared API access (Ticketmaster today; YouTube, iTunes later) lives in
+Shared API access (Ticketmaster and eBay today; YouTube, iTunes later) lives in
 `tools/common/` so several original tools can use one client, cache and error
 mapping.
 
@@ -43,6 +44,8 @@ mapping.
 | Package | Owner | Model-facing tools |
 |---|---|---|
 | `weverse/` | offline planning | `weverse_notices` |
+| `merch_appraisal/` | merch price and scam check (eBay via `tools/common/ebay.py`) | `appraise_kpop_merch` |
+| `venue_survival/` | venue surroundings and queueing tips (OpenStreetMap) | `venue_survival_kit` |
 | _yours here_ | stage / MV slice | - |
 | _yours here_ | song / lyrics slice | - |
 

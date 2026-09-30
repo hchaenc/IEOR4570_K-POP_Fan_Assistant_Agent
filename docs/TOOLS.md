@@ -14,15 +14,18 @@ index.html  <-->  app.py (FastAPI /chat, LiteLLM harness, run_agent loop)
               tools/__init__.py   auto-discovery, no shared-file edits
               │                   scans BOTH of:
               ├── originals/      one package per team member's primary tool
-              │   └── weverse/        weverse_notices (digest + full text)
+              │   ├── weverse/          weverse_notices (digest + full text)
+              │   ├── merch_appraisal/  appraise_kpop_merch (eBay price + scam check)
+              │   └── venue_survival/   venue_survival_kit (OpenStreetMap)
               └── common/         shared services and tools
                   ├── ticketmaster.py  search_ticketmaster_events
+                  ├── ebay.py          eBay Browse client (not a tool)
                   └── classify.py      notice event-type helper (not a tool)
 ```
 
 A module or package is model-callable exactly when it exposes `SCHEMAS` (list
 of OpenAI-style function schemas) and `HANDLERS` (tool name -> callable).
-`classify.py` exposes neither, so it stays internal. **Adding a tool means
+`classify.py` and `ebay.py` expose neither, so they stay internal. **Adding a tool means
 adding one file or folder** - nobody edits the registry, and original tools
 never import each other.
 
@@ -53,7 +56,9 @@ Handler rules:
 Stable error codes: `missing_credentials`, `authentication_failed`,
 `community_not_joined`, `ambiguous_artist`, `rate_limited`,
 `upstream_schema_changed`, `timeout`, `notice_not_found`,
-`unexpected_upstream_error`, plus harness-level `unknown_tool` / `bad_arguments`.
+`unexpected_upstream_error`, `no_results`, `too_few_comparables`,
+`venue_not_found`, plus harness-level `unknown_tool` / `bad_arguments` (the two
+tools below also return `bad_arguments` for a query or venue under 3 characters).
 
 ## 3. The tools
 
@@ -113,6 +118,57 @@ each member presents exactly one original tool, and `mode` makes the two
 response shapes explicit rather than implied. Dumping all 86 aespa bodies
 instead would cost ~42,000 tokens on every turn of the session.
 
+### `appraise_kpop_merch(query, target_price?)` - original
+
+What a merch item is listed for on eBay US, and which listings look risky. The
+listings come from `tools/common/ebay.py`; the tool's own work is everything
+after that:
+
+1. Drop unofficial goods (`fanmade`, `lomo`, `reprint`, `replica`, ...) and
+   bundles or pick-your-member listings, counting each under `excluded`.
+2. Sort every title into a category (`photocard`, `album`, `lightstick`,
+   `seasons_greetings`, `doll`, `concert_merch`) and a condition (`sealed` /
+   `opened` / `opened_no_photocard` for albums, `working` / `not_working` for
+   lightsticks, else `new` / `used`), and keep only the query's category and
+   condition. When the query names no condition, the most common one is used.
+3. Add shipping to the price, leave signed items and weak sellers (under 97%
+   positive or under 10 ratings) out of the price, and drop outliers beyond
+   1.5 x IQR.
+4. Flag anything under 40% of the typical price as a possible fake.
+
+```json
+{
+  "ok": true, "query": "IVE Wonyoung photocard", "source": "ebay",
+  "note": "Prices are current asking prices on eBay US, shipping included, in USD. Not sold prices.",
+  "category": "photocard", "condition": "new", "listings_compared": 7,
+  "typical_price_usd": 21.0, "typical_range_usd": [16.88, 28.0],
+  "excluded": {"unofficial": 2, "bundle_or_multi_choice": 1, "other_category": 0},
+  "best_listings": [{"title": "...", "total_usd": 16.5, "ships_from": "US", "seller_feedback_pct": 100.0, "url": "..."}],
+  "flagged_listings": [{"title": "...", "total_usd": 5.0, "why": ["price is far below the typical price: possible fake or scam"], "url": "..."}],
+  "target_price_usd": 30, "verdict": "overpriced"
+}
+```
+
+`verdict` appears only with `target_price`: `good_deal` at or under 85% of the
+typical price, `fair` up to 115%, else `overpriced`. Fewer than 3 comparable
+listings returns `too_few_comparables` (with the `excluded` counts) instead of
+a price built on one or two listings, and the message tells the model how to
+broaden the query.
+
+### `venue_survival_kit(venue, radius_m?)` - original
+
+What is around a venue, for fans queueing outside. One Nominatim lookup turns
+the venue name into coordinates, one Overpass query lists what is mapped
+within `radius_m` (default 500, clamped to 200-1500). Returns `nearby` with up
+to 3 places per category (`convenience_store`, `station`, `toilets`, `cafe`,
+`fast_food`, `pharmacy`), each with `meters`, `walk_min` (80 m/min) and, where
+mapped, `opening_hours` / `open_24h` / `paid`; `tips` built from the gaps (no
+toilet within 300 m, no 24-hour store, a quieter second station for after the
+show); `coordinates`; and a `map_url`.
+
+The `note` field says that an empty category means nothing is mapped there, not
+that nothing exists, so the model does not tell a fan there is no toilet.
+
 ### `search_ticketmaster_events(keyword, city?, country_code?)` - common
 
 Discovery API v2, one request per call. Returns `matched_count` and `events[]`
@@ -166,6 +222,30 @@ cache). Three measured constraints shape the tool:
   Melon Ticket, Japan uses e+ / Lawson). An empty result is an honest answer,
   and the notice names the real channel.
 
+### eBay (`tools/common/ebay.py`)
+
+Browse API `item_summary/search` with an application token (client-credentials
+grant), so there is no user login. `EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET` come
+from the Production keyset on developer.ebay.com; `EBAY_ENV=sandbox` switches
+host. The token (about 2 hours) and responses are cached in the shared client.
+
+- **Asking prices, not sold prices.** Browse only returns live listings; sold
+  data is a restricted API. Every result says so in `note`.
+- **eBay US, USD only.** Listings in other currencies are dropped rather than
+  converted.
+- **No keys, no numbers.** Without keys the tool returns `missing_credentials`;
+  it never falls back to sample data, so the model cannot quote a fake price.
+- It exposes no `SCHEMAS` / `HANDLERS`: the model cannot search eBay directly,
+  only through `appraise_kpop_merch`.
+
+### OpenStreetMap (`tools/originals/venue_survival/osm.py`)
+
+Nominatim and Overpass are free and need no key. Both ask for a descriptive
+User-Agent and light use, so results are cached per venue and radius for the
+life of the process. Overpass is often busy: a second mirror is tried before
+the tool gives up. Coverage depends on volunteers, which is why the result
+carries the "not mapped is not the same as not there" note.
+
 ### Event classification (`tools/common/classify.py`)
 
 Deterministic, tiered, bilingual. The title decides; the body is consulted only
@@ -203,6 +283,8 @@ source URL.
     (drives a digest call, then the same tool again with a `notice_id`)
   - "Search YOASOBI notices from the last year for pop-up events."
   - "I want to see NCT TEN live - help me plan."
+  - "Someone is selling an IVE Wonyoung LOVE DIVE photocard for $30 - is that fair?"
+  - "I'm queueing overnight at UBS Arena New York - what's around?"
 - Running locally: `uv sync --group dev` then `uv run app.py`
   (`--port` / `--host` to move off 8000). The app boots with no `.env` at all;
   the tools then return `missing_credentials` naming what to add.
@@ -213,7 +295,8 @@ source URL.
   nobody runs up somebody else's bill - gcloud charges the quota project, not
   the account that logged in.
 - Deploy note (Cloud Run): inject `WEVERSE_ACCESS_TOKEN`,
-  `WEVERSE_REFRESH_TOKEN`, `TICKETMASTER_API_KEY` and `GOOGLE_CLOUD_PROJECT`
+  `WEVERSE_REFRESH_TOKEN`, `TICKETMASTER_API_KEY`, `EBAY_CLIENT_ID`,
+  `EBAY_CLIENT_SECRET` and `GOOGLE_CLOUD_PROJECT`
   via `--set-env-vars` or Secret Manager; never bake secrets into the image.
   The refresh-token persistence writes only to the local `.env` and degrades
   gracefully on a read-only filesystem.
@@ -231,6 +314,8 @@ python -m pytest -m "live_weverse or live_ticketmaster" -q -s  # real sources
 `tests/test_classify.py` covers the classifier, `tests/test_weverse_tool.py`
 covers the original tool's two modes, annotation and envelopes, `tests/test_weverse_notice.py`
 the gateway and service, `tests/test_ticketmaster.py` the common tool, and
+`tests/test_ebay.py` the eBay client, `tests/test_merch_appraisal.py` and
+`tests/test_venue_survival.py` those two original tools, and
 `tests/test_live_e2e.py` the live paths - including a stubbed-LLM test that
 drives `run_agent` through digest -> ticketmaster -> full-text read against
 both real APIs, which is what proves the model really can compose the tools.
