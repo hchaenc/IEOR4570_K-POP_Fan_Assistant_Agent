@@ -1,20 +1,23 @@
-"""Ticketmaster Discovery API client: search ticketed events with on-sale data.
+"""Common tool: Ticketmaster Discovery API event search.
 
-Discovery API v2, free key, 5000 requests/day. This client keeps a small
-in-process response cache so repeated demo questions do not burn quota.
-Live seat inventory is NOT available through Discovery (that is a partner
-API), and priceRanges is published for only some events - for K-pop tours it
-is usually absent. What Discovery does always provide is the public on-sale
-timestamp, named presale windows, the ticket limit and the purchase URL.
+Shared by any original tool that needs ticketed events. Discovery API v2, free
+key, 5000 requests/day. This client keeps a small in-process response cache so
+repeated demo questions do not burn quota. Live seat inventory is NOT available
+through Discovery (that is a partner API), and priceRanges is published for
+only some events - for K-pop tours it is usually absent. What Discovery does
+always provide is the public on-sale timestamp, named presale windows, the
+ticket limit and the purchase URL.
+
+Coverage is territorial: North America and Europe work, South Korea and Japan
+do not, because Ticketmaster does not sell there.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import threading
-import time
-from urllib.parse import quote
 
 import requests
 from dotenv import load_dotenv
@@ -235,3 +238,98 @@ def extract_events(data: dict, keyword: str | None = None) -> list[dict]:
     # Planning reads chronologically, so restore date order locally.
     events.sort(key=lambda event: (event.get("date") or "9999-12-31", event.get("time") or "23:59:59"))
     return events
+
+
+# --- model-facing common tool --------------------------------------------------
+
+_shared_client: EventSearchClient | None = None
+_client_lock = threading.Lock()
+
+
+def get_event_client() -> EventSearchClient:
+    """One lazily created client per process, so its response cache is shared."""
+    global _shared_client
+    if _shared_client is None:
+        with _client_lock:
+            if _shared_client is None:
+                _shared_client = EventSearchClient()
+    return _shared_client
+
+
+def search_ticketmaster_events(
+    keyword: str,
+    city: str | None = None,
+    country_code: str = "US",
+) -> str:
+    """One Discovery lookup, filtered down to events whose headliner is `keyword`."""
+    try:
+        data = get_event_client().search_events(
+            keyword,
+            city=(city.strip() if isinstance(city, str) and city.strip() else None),
+            country_code=(country_code.strip().upper() if isinstance(country_code, str) and country_code.strip() else "US"),
+        )
+    except TicketmasterError as exc:
+        return json.dumps(
+            {"ok": False, "error": exc.code, "message": exc.message, "source": "ticketmaster"},
+            ensure_ascii=False,
+        )
+    events = extract_events(data, keyword=keyword)
+    return json.dumps(
+        {
+            "ok": True,
+            "keyword": keyword,
+            "city": city,
+            "country_code": country_code,
+            "matched_count": len(events),
+            "events": events,
+        },
+        ensure_ascii=False,
+    )
+
+
+SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "search_ticketmaster_events",
+        "description": (
+            "Look up upcoming events on Ticketmaster for one artist: venue, "
+            "city, date, public on-sale time, named presale windows, ticket "
+            "limit and the official purchase link. Results are filtered to "
+            "events whose headliner actually is the keyword. Call it for "
+            "notices marked ticket_relevant; pop-up stores, membership "
+            "application events and Asian dates are usually not on "
+            "Ticketmaster at all, so an empty result is an honest answer "
+            "rather than a failure. Ticketmaster does not report live seat "
+            "inventory and publishes prices for only some events."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "keyword": {
+                    "type": "string",
+                    "description": (
+                        "Artist name as the user typed it, e.g. 'MONSTA X'. "
+                        "Do not use a Weverse URL slug: 'monstax' matches "
+                        "nothing here."
+                    ),
+                },
+                "city": {
+                    "type": ["string", "null"],
+                    "description": "Optional city filter, e.g. 'New York'.",
+                },
+                "country_code": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Optional ISO country code, default 'US'. Ticketmaster "
+                        "does not operate in South Korea or Japan, so leave the "
+                        "default for other regions rather than guessing."
+                    ),
+                },
+            },
+            "required": ["keyword"],
+        },
+    },
+}
+
+SCHEMAS = [SCHEMA]
+HANDLERS = {"search_ticketmaster_events": search_ticketmaster_events}

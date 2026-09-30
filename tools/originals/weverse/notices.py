@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
 from pydantic import BaseModel
 
-from .client import (
+from .gateway import (
     GatewayError,
     NotFound,
     WeverseGatewayClient,
@@ -20,7 +20,10 @@ from .client import (
 LOOKBACK_DAYS = 365
 NOTICE_SCAN_LIMIT = 300
 REQUEST_TIMEOUT_SECONDS = 120
-MAX_RETURNED_RESULTS = 10
+# The model classifies events itself now, so the search returns the whole
+# in-window feed rather than a short page. Bounded so a very noisy community
+# cannot flood the model context with titles.
+DEFAULT_NOTICE_LIMIT = 120
 # The read tool's text budget: the model asks for detail, but whatever it
 # reads is re-sent on every later turn of the session, so keep it bounded.
 DEFAULT_READ_CHARS = 1500
@@ -38,11 +41,6 @@ class NoticeRecord(BaseModel):
 
 def _error(code: str, message: str) -> dict:
     return {"ok": False, "error": code, "message": message}
-
-
-def normalize_artist_name(value: str) -> str:
-    normalized = unicodedata.normalize("NFKC", value).casefold()
-    return "".join(character for character in normalized if character.isalnum())
 
 
 def slugify_artist(value: str) -> str:
@@ -154,12 +152,12 @@ class WeverseNoticeService:
         self,
         artist: str,
         query: str | None = None,
-        limit: int | None = MAX_RETURNED_RESULTS,
+        limit: int | None = DEFAULT_NOTICE_LIMIT,
     ) -> dict:
         """Return in-window notices, newest first, capped at `limit`.
 
-        `limit=None` removes the presentation cap: the offline-planning
-        pipeline needs every in-window notice classified, not just ten.
+        `limit=None` removes the cap entirely; the scan is still bounded by
+        NOTICE_SCAN_LIMIT notices fetched from upstream.
         """
         if not isinstance(artist, str) or not artist.strip():
             return _error("ambiguous_artist", "A single artist or community URL name is required.")
@@ -174,9 +172,9 @@ class WeverseNoticeService:
         deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
         cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
         community = self._resolve_community(artist, deadline)
-        # The name as the user typed it, not the uppercased urlPath: the
-        # pipeline reuses it as the Ticketmaster keyword, and Ticketmaster
-        # matches "MONSTA X" but finds nothing for its Weverse slug "monstax".
+        # The name as the user typed it, not the uppercased urlPath: the model
+        # reuses it as the Ticketmaster keyword, and Ticketmaster matches
+        # "MONSTA X" but finds nothing for its Weverse slug "monstax".
         display_name = artist
         url_base = f"https://weverse.io/{community['url_path']}/notice/"
 
@@ -311,9 +309,9 @@ _shared_lock = threading.Lock()
 def get_notice_service() -> WeverseNoticeService:
     """One lazily created service per process.
 
-    Both offline-planning tools share it so the rotated access token stays in
-    memory; a fresh client per call would restart from the stale .env token and
-    pay a 401-plus-refresh cycle every time.
+    Both Weverse tools share it so the rotated access token stays in memory; a
+    fresh client per call would restart from the stale .env token and pay a
+    401-plus-refresh cycle every time.
     """
     global _shared_service
     if _shared_service is None:

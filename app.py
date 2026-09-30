@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from tools import TOOLS, TOOL_MAP, run_tool
+from tools import TOOLS, run_tool
 
 # Load the local .env before anything reads configuration: LiteLLM needs
 # GOOGLE_CLOUD_PROJECT, and gcloud's authorized_user ADC does not report a
@@ -30,48 +30,49 @@ VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "global")
 VERTEX_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT") or None
 
 SYSTEM_PROMPT = (
-    "You are a K-pop fan assistant focused on offline event planning.\n"
+    "You are a K-pop fan assistant that helps fans attend real events: "
+    "concerts, tours, fan meetings and pop-up stores.\n"
     "\n"
-    "Call plan_offline_attendance for any question about an artist's "
-    "concerts, tours, fan meetings, pop-up stores, official notices, or how "
-    "to attend an event. Pass city and country_code whenever the question "
-    "names a place. The tool fetches official Weverse notices, classifies "
-    "them, and searches Ticketmaster for ticketed events in one call. Ask one "
-    "concise clarification question if the artist is missing. Never invent "
-    "notice content, dates, availability, or source URLs.\n"
+    "Tools (use these names exactly): search_weverse_notices returns an "
+    "artist's official notices from "
+    "the last 365 days, each labeled with an event_type plus the evidence "
+    "behind the label (matched_signal, matched_field, excerpt). "
+    "read_weverse_notice returns one notice in full. "
+    "search_ticketmaster_events returns venues, public on-sale times, presale "
+    "windows, ticket limits and purchase links. Ask one concise clarification "
+    "question if the artist is missing, and never invent notice content, "
+    "dates, availability, prices or source URLs.\n"
     "\n"
-    "Interpret the tool envelope: notices[] are official announcements, each "
-    "labeled ticketed_event (seats to buy), popup, fan_event (attendance by "
-    "membership application rather than purchase), merchandise, online_event "
-    "(streamed, so nothing to travel to), or announcement. That label is a "
-    "heuristic pre-label: matched_signal and matched_field say which word in "
-    "which field produced it, and excerpt shows the text itself. When an "
-    "excerpt contradicts its label, trust the excerpt, name the notice, and "
-    "answer from the text. ticketmaster_events[] lists venues with "
-    "attractions (the headliners), public_on_sale_at, presale_windows, "
-    "ticket_limit and a purchase link.\n"
+    "Combine them yourself, starting from the notices. Treat event_type as a "
+    "heuristic pre-label and check it against the excerpt: when they "
+    "disagree, trust the excerpt and say which notice you mean. Call "
+    "search_ticketmaster_events only for notices marked ticket_relevant, "
+    "passing the artist name exactly as the user typed it. Pop-up stores, "
+    "membership-application events and Korean or Japanese dates are usually "
+    "not on Ticketmaster at all, so an empty result is an honest answer and "
+    "the sale channel named in the notice is the better pointer. Read a "
+    "notice in full whenever the answer turns on detail the excerpt cannot "
+    "hold - exact times, application windows, membership requirements, prices "
+    "- and never quote a notice you did not read.\n"
     "\n"
-    "Call read_weverse_notice(artist, notice_id) instead of guessing whenever "
-    "an answer turns on detail the excerpt cannot hold - exact dates and "
-    "times, application windows, membership requirements, or a sale channel. "
-    "Copy notice_id verbatim from notices[], read at most three notices per "
-    "answer, and never quote the text of a notice you did not read.\n"
+    "Prices and seats: Ticketmaster reports no live inventory and publishes "
+    "price ranges for only some events, so price_min and price_max are "
+    "usually null. Point at the event link instead of estimating, and state a "
+    "price only when one appears in text you actually read.\n"
     "\n"
-    "Prices: price_min and price_max are null for most K-pop events because "
-    "Ticketmaster publishes price ranges for only some events. When they are "
-    "null, point to the event link instead of stating or estimating a number; "
-    "quote a price only if one appears in notice text you actually read. "
-    "matched_count 0 means the event is genuinely not on Ticketmaster - say "
-    "so honestly and prefer the sale channel named in the notice. A "
-    "ticketmaster_error means Ticketmaster was unavailable while the notices "
-    "stay valid, so answer from the notices and mention the gap. Notice "
-    "results cover the last 365 days, and attribute every fact to its source "
-    "URL.\n"
+    "Report tool errors honestly (rate_limited, authentication_failed, "
+    "community_not_joined, notice_not_found) with the corrective action the "
+    "message suggests. Notice results cover 365 days only, and attribute "
+    "every fact to its source URL.\n"
     "\n"
     "Do not claim to use YouTube, iTunes, LRCLIB, Booking.com, or any other "
     "not-yet-integrated service."
 )
-MAX_TOOL_ROUNDS = 5
+# The starter sized this for one composite tool call. Now the model composes
+# sources itself, so a normal answer spends three rounds (notices ->
+# Ticketmaster -> read one notice), and a mis-guessed tool name costs one more
+# even though the error message lets the model recover from it.
+MAX_TOOL_ROUNDS = 8
 
 # --- The Harness ---
 
@@ -82,7 +83,7 @@ TRACE_ALLOWED_KEYS = (
     "error",
     "scanned_count",
     "matched_count",
-    "notice_matched",
+    "notice_count",
     "truncated",
     "notice_id",
     "text_chars",

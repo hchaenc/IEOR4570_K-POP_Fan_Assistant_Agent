@@ -257,8 +257,8 @@
                 const stats = [
                     summary.ok === true ? "ok" : summary.ok === false ? "error " + summary.error : "",
                     summary.scanned_count != null ? "scanned " + summary.scanned_count : "",
-                    summary.notice_matched != null ? "in window " + summary.notice_matched : "",
-                    summary.matched_count != null ? "ticketmaster " + summary.matched_count : "",
+                    summary.notice_count != null ? "returned " + summary.notice_count : "",
+                    summary.matched_count != null ? "matched " + summary.matched_count : "",
                     summary.text_chars != null ? "chars " + summary.text_chars : "",
                     call.elapsed_ms != null ? call.elapsed_ms + " ms" : "",
                 ].filter(Boolean);

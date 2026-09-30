@@ -1,9 +1,8 @@
-"""Mocked tests for the shipped tools.weverse package and the tool registry.
+"""Mocked tests for the Weverse notice service and its signed gateway client.
 
 All tests run against fake HTTP responses injected through the client's
-getter/poster seams - no network access and no real credentials. The live
-path (same imports, real gateway) is covered separately in test_live_smoke.py
-and test_chat_chain_live.py.
+getter/poster seams - no network access and no real credentials. The live path
+(same imports, real gateway) is covered in test_live_e2e.py.
 """
 
 import base64
@@ -13,16 +12,15 @@ import time
 import pytest
 
 import tools
-import tools.integrations.weverse.notices as weverse_notice_module
+import tools.originals.weverse.notices as weverse_notice_module
 from tools import TOOL_MAP, TOOLS, run_tool
-from tools.integrations.weverse.client import GatewayError, WeverseGatewayClient, sign_request
-from tools.integrations.weverse.notices import (
+from tools.originals.weverse.gateway import GatewayError, WeverseGatewayClient, sign_request
+from tools.originals.weverse.notices import (
+    DEFAULT_NOTICE_LIMIT,
     DEFAULT_READ_CHARS,
     MAX_READ_CHARS,
-    MAX_RETURNED_RESULTS,
     WeverseNoticeService,
     html_to_text,
-    normalize_artist_name,
 )
 
 RECENT_MS = int((time.time() - 10 * 86400) * 1000)
@@ -104,7 +102,7 @@ def make_service(blocks, resolver=None, poster=no_refresh):
 
 
 def test_missing_credentials_returns_structured_error(monkeypatch):
-    monkeypatch.setattr("tools.integrations.weverse.client.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setattr("tools.originals.weverse.gateway.load_dotenv", lambda *a, **k: None)
     monkeypatch.delenv("WEVERSE_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("WEVERSE_REFRESH_TOKEN", raising=False)
     client = WeverseGatewayClient(getter=fake_getter([]), env_path="nonexistent.env")
@@ -115,7 +113,7 @@ def test_missing_credentials_returns_structured_error(monkeypatch):
 
 
 def test_authentication_failure_does_not_leak_secrets(monkeypatch):
-    monkeypatch.setattr("tools.integrations.weverse.client.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setattr("tools.originals.weverse.gateway.load_dotenv", lambda *a, **k: None)
     monkeypatch.delenv("WEVERSE_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("WEVERSE_REFRESH_TOKEN", raising=False)
     secret = "super-secret-access-abc123"
@@ -154,8 +152,8 @@ def test_ambiguous_artist_returns_candidates():
 def test_spaced_artist_name_falls_back_to_the_despaced_slug():
     """Weverse files MONSTA X under urlPath 'monstax', not the hyphenated guess.
 
-    The returned artist name must stay as typed, because the pipeline reuses
-    it as the Ticketmaster keyword and 'MONSTAX' matches no events there.
+    The returned artist name must stay as typed, because the model reuses it as
+    the Ticketmaster keyword and 'MONSTAX' matches no events there.
     """
     keywords = []
 
@@ -190,14 +188,15 @@ def test_spaced_artist_name_falls_back_to_the_despaced_slug():
     assert result["results"][0]["url"] == "https://weverse.io/monstax/notice/7"
 
 
-def test_limit_none_returns_the_whole_in_window_feed():
+def test_limit_caps_the_feed_and_none_removes_the_cap():
     items = [make_notice(i, f"n{i}", "body", RECENT_MS - i * 3600_000) for i in range(12)]
     service = make_service(notices_block(items))
 
-    capped = service.search_notices("yoasobi")
+    capped = service.search_notices("yoasobi", limit=5)
     whole = service.search_notices("yoasobi", limit=None)
 
-    assert len(capped["results"]) == MAX_RETURNED_RESULTS
+    assert len(capped["results"]) == 5
+    # matched_count always reports the whole in-window match set, not the page
     assert capped["matched_count"] == 12
     assert len(whole["results"]) == 12
     assert whole["matched_count"] == 12
@@ -252,7 +251,7 @@ def test_access_token_auto_refreshes_on_401():
 
 
 def test_refresh_failure_returns_authentication_failed(monkeypatch):
-    monkeypatch.setattr("tools.integrations.weverse.client.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setattr("tools.originals.weverse.gateway.load_dotenv", lambda *a, **k: None)
     monkeypatch.delenv("WEVERSE_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("WEVERSE_REFRESH_TOKEN", raising=False)
 
@@ -434,14 +433,16 @@ def test_query_matches_title_and_body():
     assert [r["notice_id"] for r in service.search_notices("yoasobi", query="seoul")["results"]] == ["1"]
 
 
-def test_result_limit_is_ten():
-    items = [make_notice(i, f"n{i}", "b", RECENT_MS) for i in range(15)]
+def test_default_limit_returns_the_whole_window():
+    """The model classifies events itself, so it needs the feed, not a page."""
+    items = [make_notice(i, f"n{i}", "b", RECENT_MS - i * 3600_000) for i in range(15)]
     client = WeverseGatewayClient(
         getter=fake_getter(notices_block(items)), poster=no_refresh, access_token="t", refresh_token="r", env_path="x"
     )
     result = WeverseNoticeService(client=client).search_notices("yoasobi")
     assert result["matched_count"] == 15
-    assert len(result["results"]) == MAX_RETURNED_RESULTS == 10
+    assert len(result["results"]) == 15
+    assert DEFAULT_NOTICE_LIMIT >= 15, "the default must not silently drop notices"
 
 
 # --- signature & registry -------------------------------------------------------
@@ -457,11 +458,12 @@ def test_signed_request_includes_signature_params():
     assert keys[:-2] == sorted(keys[:-2])
 
 
-def test_weverse_integration_is_not_registered_as_a_tool():
-    # Data-source adapters must stay out of the model-facing registry; the
-    # offline-planning tools compose them instead.
-    assert "search_weverse_notices" not in TOOL_MAP
-    assert "plan_offline_attendance" in TOOL_MAP
+def test_gateway_internals_are_not_registered_as_tools():
+    """Only the two Weverse tools face the model; the client and service do not."""
+    assert "search_weverse_notices" in TOOL_MAP
+    assert "read_weverse_notice" in TOOL_MAP
+    assert "WeverseGatewayClient" not in TOOL_MAP
+    assert "search_notices" not in TOOL_MAP
 
 
 # --- progressive disclosure: read one notice in full -----------------------------

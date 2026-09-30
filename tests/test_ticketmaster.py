@@ -1,11 +1,11 @@
-"""Mocked tests for the tools.ticketmaster package (no network, no real key)."""
+"""Mocked tests for the Ticketmaster common tool (no network, no real key)."""
 
 import json
 
 import pytest
 
-from tools import TOOL_MAP, TOOLS, run_tool
-from tools.integrations.ticketmaster.service import EventSearchClient, extract_events
+from tools import TOOL_MAP, run_tool
+from tools.common.ticketmaster import EventSearchClient, extract_events
 
 
 DISCOVERY = "app.ticketmaster.com"
@@ -89,11 +89,11 @@ def test_cache_prevents_second_network_call():
 
 
 def test_missing_key_raises_missing_credentials(monkeypatch):
-    monkeypatch.setattr("tools.integrations.ticketmaster.service.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setattr("tools.common.ticketmaster.load_dotenv", lambda *a, **k: None)
     monkeypatch.delenv("TICKETMASTER_API_KEY", raising=False)
     client, _ = make_client({})
     client._api_key = None
-    with pytest.raises(type(client).__mro__ and Exception) as excinfo:  # TicketmasterError family
+    with pytest.raises(Exception) as excinfo:
         client.search_events("ATEEZ")
     assert getattr(excinfo.value, "code", "") == "missing_credentials"
 
@@ -211,3 +211,50 @@ def test_extract_sorts_events_chronologically():
         "Earlier",
         "Later",
     ]
+
+
+# --- tool layer (what the model calls) -------------------------------------------
+
+
+def patch_client(monkeypatch, payload, status_code=200):
+    """Point the shared client at a fake getter for one test."""
+    import tools.common.ticketmaster as ticketmaster_module
+
+    client, getter = make_client(payload, status_code=status_code)
+    monkeypatch.setattr(ticketmaster_module, "get_event_client", lambda: client)
+    return getter
+
+
+def test_tool_is_registered_as_a_common_tool():
+    assert "search_ticketmaster_events" in TOOL_MAP
+
+
+def test_tool_returns_the_shaped_event_list(monkeypatch):
+    raw = with_attractions(sample_event("aespa LIVE TOUR", "idA"), "aespa")
+    raw["sales"] = {"public": {"startDateTime": "2026-05-06T20:00:00Z"}}
+    patch_client(monkeypatch, discovery_payload([raw]))
+
+    result = json.loads(run_tool("search_ticketmaster_events", {"keyword": "aespa", "country_code": "US"}))
+    assert result["ok"] is True
+    assert result["matched_count"] == 1
+    assert result["events"][0]["public_on_sale_at"] == "2026-05-06T20:00:00Z"
+    assert result["events"][0]["attractions"] == ["aespa"]
+
+
+def test_tool_maps_upstream_failure_to_a_safe_envelope(monkeypatch):
+    patch_client(monkeypatch, {}, status_code=429)
+    result = json.loads(run_tool("search_ticketmaster_events", {"keyword": "aespa"}))
+
+    assert result["ok"] is False
+    assert result["error"] == "rate_limited"
+    assert result["source"] == "ticketmaster"
+    assert "test-tm-key" not in json.dumps(result), "the API key must never reach the model"
+
+
+def test_tool_normalizes_blank_city_and_lowercase_country(monkeypatch):
+    getter = patch_client(monkeypatch, discovery_payload([]))
+    run_tool("search_ticketmaster_events", {"keyword": "aespa", "city": "  ", "country_code": "gb"})
+
+    sent = getter.calls[0]["params"]
+    assert "city" not in sent, "a blank city would filter every event out"
+    assert sent["countryCode"] == "GB"

@@ -1,27 +1,36 @@
-"""Tool registry: auto-discovers every tools/<name>/ subpackage.
+"""Tool registry: auto-discovers tools from the two families.
 
-Each tool lives in its own subpackage and exposes two package attributes:
+  tools/originals/<name>/   one package per team member's primary tool
+  tools/common/<name>.py    shared services and tools (Ticketmaster today;
+                            YouTube, iTunes later)
+
+A module or package is model-callable exactly when it exposes:
 
   SCHEMAS:  list[dict]  - OpenAI-style function schemas shown to the model
   HANDLERS: dict[str, callable] - tool_name -> function returning a JSON string
 
-Adding a tool never touches this file or anyone else's files: create
-tools/<your_tool>/ with those two attributes and it is registered.
+Helper modules (tools/common/classify.py) expose neither and stay internal.
+
+Adding a tool never touches this file: create the package or module with those
+two attributes and it is registered.
 """
 
 import importlib
 import json
 import pkgutil
+from pathlib import Path
+
+FAMILIES = ("originals", "common")
 
 TOOLS: list[dict] = []
 TOOL_MAP: dict[str, callable] = {}
 
-for _module_info in pkgutil.iter_modules(__path__):
-    if not _module_info.ispkg:
-        continue
-    _module = importlib.import_module(f"{__name__}.{_module_info.name}")
-    TOOLS.extend(getattr(_module, "SCHEMAS", []))
-    TOOL_MAP.update(getattr(_module, "HANDLERS", {}))
+for _family in FAMILIES:
+    _family_path = Path(__file__).parent / _family
+    for _module_info in pkgutil.iter_modules([str(_family_path)]):
+        _module = importlib.import_module(f"{__name__}.{_family}.{_module_info.name}")
+        TOOLS.extend(getattr(_module, "SCHEMAS", []))
+        TOOL_MAP.update(getattr(_module, "HANDLERS", {}))
 
 
 def run_tool(name: str, args: dict) -> str:

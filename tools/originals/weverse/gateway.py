@@ -30,10 +30,14 @@ from dotenv import load_dotenv
 API_BASE = "https://global.apis.naver.com/weverse/wevweb"
 ACCOUNT_API = "https://accountapi.weverse.io"
 REFRESH_URL = f"{ACCOUNT_API}/api/v1/token/refresh"
-HMAC_ACTIVE_KEY = "1b9cb6378d959b45714bec49971ade22e6e24e42"
-APP_ID = "be4d79eb8fc7bd008ee82c8ec4ff6fd4"
 
-COMMON_PARAMS = {"appId": APP_ID, "language": "en", "os": "WEB", "platform": "WEB", "wpf": "pc"}
+# Weverse's own client identifiers. They are not user credentials - every
+# browser that loads weverse.io carries them - but they are configuration, so
+# they come from the environment like everything else and can be updated
+# without a code edit when Weverse rotates them.
+HMAC_ACTIVE_KEY_ENV = "WEVERSE_HMAC_ACTIVE_KEY"
+APP_ID_ENV = "WEVERSE_APP_ID"
+
 BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -50,11 +54,12 @@ class GatewayError(Exception):
 
 
 class MissingCredentials(GatewayError):
-    def __init__(self):
+    def __init__(self, detail: str = ""):
         super().__init__(
             "missing_credentials",
             "Weverse is not configured. Set WEVERSE_ACCESS_TOKEN and WEVERSE_REFRESH_TOKEN "
-            "in the local .env (see docs/TOOLS.md).",
+            "in the local .env (see docs/TOOLS.md)."
+            + (f" Also missing: {detail}." if detail else ""),
         )
 
 
@@ -94,6 +99,24 @@ class UnexpectedUpstream(GatewayError):
         super().__init__("unexpected_upstream_error", "Weverse request failed unexpectedly. Try again later.")
 
 
+def _required_env(name: str) -> str:
+    value = (os.environ.get(name) or "").strip()
+    if not value:
+        raise MissingCredentials(name)
+    return value
+
+
+def common_params() -> dict:
+    """The parameters every Weverse gateway request carries."""
+    return {
+        "appId": _required_env(APP_ID_ENV),
+        "language": "en",
+        "os": "WEB",
+        "platform": "WEB",
+        "wpf": "pc",
+    }
+
+
 def sign_request(path: str, params: dict, timestamp_ms: int | None = None) -> dict:
     """Return (url, params) with wmd/wmsgpad attached to a signed request.
 
@@ -107,7 +130,8 @@ def sign_request(path: str, params: dict, timestamp_ms: int | None = None) -> di
     query = urlencode(sorted(params.items()))
     wmsgpad = str(timestamp_ms if timestamp_ms is not None else int(time.time() * 1000))
     payload = f"{path}?{query}"[:255] + wmsgpad
-    digest = hmac.new(HMAC_ACTIVE_KEY.encode(), payload.encode(), hashlib.sha1).digest()
+    key = _required_env(HMAC_ACTIVE_KEY_ENV)
+    digest = hmac.new(key.encode(), payload.encode(), hashlib.sha1).digest()
     signed = dict(sorted(params.items()))
     signed["wmd"] = base64.b64encode(digest).decode()
     signed["wmsgpad"] = wmsgpad
@@ -214,7 +238,7 @@ class WeverseGatewayClient:
         if remaining <= 0:
             raise Timeout()
         access, _ = self._tokens()
-        request = sign_request(path, {**COMMON_PARAMS, **params})
+        request = sign_request(path, {**common_params(), **params})
         try:
             return self._getter(
                 request["url"],

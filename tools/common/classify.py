@@ -1,10 +1,6 @@
-"""Notice classifier for the offline-planning pipeline.
+"""Notice event-type annotation, shared by every tool that reads notices.
 
-Deterministic, tiered heuristic implementing the decision gate from
-docs/TOOLS.md: every notice gets exactly one `event_type`, and only
-`ticketed_event` spends Ticketmaster quota.
-
-Two tiers, in this order:
+Deterministic, tiered heuristic:
 
   1. the title decides;
   2. the body is consulted only when the title says nothing.
@@ -19,12 +15,15 @@ boilerplate, and scanning titles alone missed notices whose type only appears
 in the body (lightstick sales, streamed birthday parties). Each tier therefore
 gets its own hint list, with the body tier deliberately narrower.
 
-The classifier is a pre-filter, not an oracle: the envelope ships the matched
-signal, which field matched it, and an excerpt of the evidence, so the LLM can
-disagree with a label using text it can actually see.
+This is a pre-filter, not an oracle. Callers ship `matched_signal`,
+`matched_field` and an evidence excerpt alongside the label so the LLM can
+disagree with it using text it can actually see; `ticket_relevant` is the
+suggestion of when a Ticketmaster lookup is worth a request.
 """
 
 from __future__ import annotations
+
+TICKETED_EVENT = "ticketed_event"
 
 # --- title tier ---------------------------------------------------------------
 
@@ -116,7 +115,7 @@ _RULES = (
     ("popup", POPUP_HINTS, POPUP_HINTS),
     ("fan_event", FAN_TITLE_HINTS, FAN_BODY_HINTS),
     ("merchandise", MERCHANDISE_HINTS, MERCHANDISE_HINTS),
-    ("ticketed_event", TICKETED_TITLE_HINTS, TICKETED_BODY_HINTS),
+    (TICKETED_EVENT, TICKETED_TITLE_HINTS, TICKETED_BODY_HINTS),
 )
 
 TITLE_RULES = tuple((label, tuple(h.casefold() for h in title_hints)) for label, title_hints, _ in _RULES)
@@ -131,53 +130,21 @@ def _first_match(haystack: str, rules: tuple) -> tuple[str | None, str | None]:
     return None, None
 
 
-def classify_notice(notice: dict) -> dict:
-    """Return the standard decision object (docs/TOOLS.md, judge protocol)."""
-    title = str(notice.get("title") or "").casefold()
-    label, signal = _first_match(title, TITLE_RULES)
+def classify_notice(title: str, text: str = "") -> dict:
+    """Label one notice and report the evidence behind the label."""
+    label, signal = _first_match(str(title or "").casefold(), TITLE_RULES)
     matched_field = "title"
     if label is None:
-        label, signal = _first_match(str(notice.get("text") or "").casefold(), BODY_RULES)
+        label, signal = _first_match(str(text or "").casefold(), BODY_RULES)
         matched_field = "body"
     if label is None:
         label, matched_field = "announcement", None
 
     return {
-        "notice_id": notice.get("notice_id"),
-        "title": notice.get("title"),
         "event_type": label,
         "matched_signal": signal,
         "matched_field": matched_field,
-        "ticketmaster_search": {
-            # Only purchasable seats justify a Discovery API request.
-            "should_search": label == "ticketed_event",
-            "keyword": notice.get("artist"),
-            # city/country come from the tool call, merged by the pipeline
-        },
+        # A suggestion for the model: only purchasable seats usually justify a
+        # Ticketmaster request.
+        "ticket_relevant": label == TICKETED_EVENT,
     }
-
-
-def classify_notices(notices: list[dict], city: str | None = None, country_code: str = "US") -> list[dict]:
-    """Classify a notice list; merges the caller's geo filters into search args."""
-    decisions = []
-    for notice in notices:
-        decision = classify_notice(notice)
-        decision["ticketmaster_search"]["city"] = city
-        decision["ticketmaster_search"]["country_code"] = country_code
-        decisions.append(decision)
-    return decisions
-
-
-def ticketed_decisions(decisions: list[dict]) -> list[dict]:
-    """Unique Ticketmaster search arguments among ticketed decisions, in order."""
-    seen: set[tuple] = set()
-    unique = []
-    for decision in decisions:
-        args = decision["ticketmaster_search"]
-        if not args["should_search"]:
-            continue
-        key = (args["keyword"], args["city"], args["country_code"])
-        if key not in seen:
-            seen.add(key)
-            unique.append(dict(args))
-    return unique

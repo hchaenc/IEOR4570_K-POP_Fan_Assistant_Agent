@@ -40,16 +40,22 @@ BY_CREDENTIALS_URL = f"{ACCOUNT_API}/web/api/v4/auth/token/by-credentials"
 WITH_OTP_URL = f"{ACCOUNT_API}/web/api/v3/auth/token/by-credentials-with-otp"
 OTP_SESSION_STATE = Path(".weverse_otp_session.json")
 
-APP_SECRET = "5419526f1c624b38b10787e5c10b2a7a"
+# Weverse's client secret. It is public in the sense that the weverse.io web
+# bundle ships it to every browser, but it is configuration rather than code,
+# so it comes from .env and can be updated without editing this file.
+APP_SECRET_ENV = "WEVERSE_APP_SECRET"
 
 
 def _headers() -> dict:
+    app_secret = (os.environ.get(APP_SECRET_ENV) or "").strip()
+    if not app_secret:
+        sys.exit(f"{APP_SECRET_ENV} is not set. Add it to the local .env (see docs/TOOLS.md).")
     device_id = os.environ.get("WEVERSE_DEVICE_ID") or str(uuid.uuid4())
     return {
         "Content-Type": "application/json",
         "X-ACC-TRACE-ID": str(uuid.uuid4()),
         "X-ACC-APP-VERSION": "4.8.0",
-        "X-ACC-APP-SECRET": APP_SECRET,
+        "X-ACC-APP-SECRET": app_secret,
         "X-ACC-SERVICE-ID": "wemember",
         "X-ACC-LANGUAGE": "en",
         "X-CLOG-USER-DEVICE-ID": device_id,

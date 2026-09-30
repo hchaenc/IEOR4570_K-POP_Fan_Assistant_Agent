@@ -1,9 +1,9 @@
-# Tools Framework & the Offline-Planning Tool
+# Tools Framework
 
 How the tool system is organized, the unified tool contract, and everything
-operational about the offline-planning tool (Weverse notices + Ticketmaster
-events). Booking.com was cancelled from the project scope: it is not
-planned, implemented, or referenced anywhere.
+operational about the two families: original tools (one per team member) and
+common tools (shared API access). Booking.com was cancelled from the project
+scope: it is not planned, implemented, or referenced anywhere.
 
 ## 1. Architecture
 
@@ -11,34 +11,30 @@ planned, implemented, or referenced anywhere.
 index.html  <-->  app.py (FastAPI /chat, LiteLLM harness, run_agent loop)
                         |
                         v
-              tools/  (auto-discovering registry)
-              ├── __init__.py            # scans tools/*/ for SCHEMAS + HANDLERS
-              ├── offline_planning/      # this slice's registered tools
-              │   ├── __init__.py        # SCHEMAS + HANDLERS (two tools)
-              │   ├── tool.py            # plan_offline_attendance: args + envelope
-              │   ├── read_tool.py       # read_weverse_notice: full text on demand
-              │   ├── pipeline.py        # notices -> judge -> conditional TM -> merge
-              │   ├── judge.py           # tiered (title-first) notice classifier
-              │   └── README.md          # full component/input/output documentation
-              └── integrations/          # data-source adapters, NOT registered
-                  ├── weverse/           # signed gateway client + notice search/read
-                  └── ticketmaster/      # Discovery API client + event shaping
+              tools/__init__.py   auto-discovery, no shared-file edits
+              │                   scans BOTH of:
+              ├── originals/      one package per team member's primary tool
+              │   ├── weverse/        search_weverse_notices, read_weverse_notice
+              │   ├── stage_videos/   placeholder, registers nothing
+              │   └── song_lyrics/    placeholder, registers nothing
+              └── common/         shared services and tools
+                  ├── ticketmaster.py  search_ticketmaster_events
+                  └── classify.py      notice event-type helper (not a tool)
 ```
 
-`app.py` only ever imports `from tools import TOOLS, run_tool`. The registry
-imports every `tools/<name>/` subpackage and registers the ones exposing
-`SCHEMAS` + `HANDLERS`; `tools/integrations/` defines neither, so adapters
-stay internal. **Adding a tool = creating one folder; adding a data source =
-creating one adapter folder. No shared-file edits.**
+A module or package is model-callable exactly when it exposes `SCHEMAS` (list
+of OpenAI-style function schemas) and `HANDLERS` (tool name -> callable).
+`classify.py` exposes neither, so it stays internal. **Adding a tool means
+adding one file or folder** - nobody edits the registry, and original tools
+never import each other.
 
-## 2. Tool contract (unified input/output)
+The division of labour is deliberate: an original tool returns annotated data
+from its own source and performs **no cross-source orchestration**. Deciding
+that a ticketed notice deserves a Ticketmaster lookup is the model's job inside
+its tool loop. Shared API access lives in `common/` so several original tools
+can reuse one client, cache and error mapping.
 
-A tool package exposes two attributes in its `__init__.py`:
-
-```python
-SCHEMAS: list[dict]             # OpenAI-style function schemas the model sees
-HANDLERS: dict[str, callable]   # {"tool_name": handler_function}
-```
+## 2. Tool contract
 
 Handler rules:
 
@@ -49,74 +45,85 @@ Handler rules:
    plus `"source": "<integration>"` when a specific adapter failed.
 4. Configuration via environment variables only (local `.env`, git-ignored).
 5. Trace safety: `app.safe_trace_result()` whitelists the scalar summary keys
-   (`ok`, `error`, `scanned_count`, `matched_count`, `notice_matched`,
-   `truncated`, `notice_id`, `text_chars`) shown in the chat UI. Notice bodies
-   and excerpts exist only so the model can audit a label, so they are
-   deliberately excluded from the whitelist and stay in the model context.
+   (`ok`, `error`, `scanned_count`, `matched_count`, `notice_count`,
+   `truncated`, `notice_id`, `text_chars`) for the collapsed trace header. The
+   full envelope is also sent to the browser under `result` so a grader can
+   expand exactly what the model was told; `text` and `excerpt` are never in
+   the summary.
 
 Stable error codes: `missing_credentials`, `authentication_failed`,
 `community_not_joined`, `ambiguous_artist`, `rate_limited`,
-`upstream_schema_changed`, `timeout`, `unexpected_upstream_error`,
-`notice_not_found`, plus harness-level `unknown_tool` / `bad_arguments`.
+`upstream_schema_changed`, `timeout`, `notice_not_found`,
+`unexpected_upstream_error`, plus harness-level `unknown_tool` / `bad_arguments`.
 
-## 3. The offline-planning tools
+## 3. The tools
 
-Full component/input/output documentation lives in
-[`tools/offline_planning/README.md`](../tools/offline_planning/README.md).
-Summary:
+### `search_weverse_notices(artist, query?, limit?)` - original
 
+One signed request fetches up to 300 recent notices, keeps the last 365 days,
+deduplicates by id, strips HTML to text and returns up to `limit` (default 120,
+which covers the whole window for most artists) newest-first:
+
+```json
+{
+  "ok": true, "artist": "aespa", "community_id": 125,
+  "cutoff": "2025-09-30T00:00:00+00:00",
+  "scanned_count": 300, "matched_count": 86, "notice_count": 86, "truncated": false,
+  "notices": [
+    {
+      "notice_id": "36316",
+      "title": "[NOTICE] 2026-27 aespa LIVE TOUR Announcement",
+      "published_at": "2026-04-21T04:00:00+00:00",
+      "url": "https://weverse.io/aespa/notice/36316",
+      "event_type": "ticketed_event",
+      "matched_signal": "tour",
+      "matched_field": "title",
+      "ticket_relevant": true,
+      "excerpt": "Hello. We are aespa. 2026-27 aespa LIVE TOUR ..."
+    }
+  ]
+}
 ```
-plan_offline_attendance(artist, city?, country_code?, notice_query?)
-read_weverse_notice(artist, notice_id, max_chars?)
-```
 
-`plan_offline_attendance` performs the whole pipeline in one call:
+Every notice carries its own evidence: `matched_signal` (the word that fired),
+`matched_field` (`title`, `body`, or null) and `excerpt`. The full body does not
+appear here - that is what `read_weverse_notice` is for.
 
-1. **Notices** - `integrations/weverse` fetches the artist's official Weverse
-   notices (last 365 days, dynamic slug resolution, no community join needed).
-   Every in-window notice reaches the judge, up to 120.
-2. **Judge** - `judge.py` labels each notice `ticketed_event` / `popup` /
-   `fan_event` / `merchandise` / `online_event` / `announcement` with a
-   tiered bilingual hint scan (title first, body only when the title is
-   silent) and decides `should_search` (ticketed only).
-3. **Ticketmaster** - `integrations/ticketmaster` searches Discovery once per
-   unique `(keyword, city, country_code)` for ticketed notices, keeping only
-   events whose headliner actually is the artist.
-4. **Merge** - one envelope: trace-safe summary keys plus `notices[]`, where
-   each notice carries its own evidence (`event_type`, `matched_signal`,
-   `matched_field`, `excerpt`), and `ticketmaster_events[]`.
+Artist names are resolved to a Weverse `urlPath` by trying the hyphenated slug
+then the despaced one: Weverse files MONSTA X as `monstax`, so a single guess
+would 404. The `artist` field echoes what the user typed, because the model
+reuses it as the Ticketmaster keyword and `MONSTAX` matches nothing there.
 
-`read_weverse_notice` is the escalation path. The course guidance for
-search-style tools is "return titles + summaries to start... combine with a
-'read page' tool for deeper dives", so the planning envelope ships a
-signal-centered 180-character excerpt per notice and this tool returns the
-whole body (default 1500 chars, capped at 5000) when a question turns on
-detail the excerpt cannot hold. It reuses the list request, because the
-`tabContent` endpoint already returns complete bodies - there is no
-per-notice endpoint to discover.
+### `read_weverse_notice(artist, notice_id, max_chars?)` - original
 
-Why the classifier stays in code: it decides how Ticketmaster quota is spent,
-and it costs zero model tokens either way. Dumping all 86 aespa bodies into the
-context instead would cost ~42,000 tokens per turn, re-sent on every later
-turn of the session, and would still leave the quota decision unexplained.
+Returns one notice's full text (default 1500 chars, capped at 5000) plus
+`text_chars` and `truncated`, so the model can quote application windows,
+membership rules or prices that never fit in an excerpt. It reuses the list
+request, because `tabContent` already returns complete bodies - there is no
+per-notice endpoint to discover, and no cache to invalidate.
 
-Known limits encoded in the system prompt and the tool docs: notices cover
-365 days; Ticketmaster publishes no price range for most K-pop events (and no
-seat inventory at all) so the tool reports on-sale times, presale windows and
-ticket limits instead; a community with no NOTICE tab answers HTTP 404 and is
-reported as such rather than as a transient failure.
+Progressive disclosure is the point: a compact digest first, the raw body only
+when the answer needs it (course slides p.29: "return titles + summaries to
+start... combine with a 'read page' tool for deeper dives"). Dumping all 86
+aespa bodies instead would cost ~42,000 tokens on every turn of the session.
+
+### `search_ticketmaster_events(keyword, city?, country_code?)` - common
+
+Discovery API v2, one request per call. Returns `matched_count` and `events[]`
+with name, date, time, timezone, status, venue, city, country, `attractions`
+(the headliners), `public_on_sale_at`, `presale_windows`, `ticket_limit`,
+`please_note` and the purchase `url`.
 
 ## 4. Data-source operations
 
-### Weverse (tools/integrations/weverse)
+### Weverse (`tools/originals/weverse/`)
 
-The original `MujyKun/Weverse` library is dead: its login endpoint rejects
-everything with `-10004` and its content host no longer resolves in DNS. The
-adapter implements the current contract instead: reads go through the Naver
-gateway with a Naver-style HMAC-SHA1 request signature, auth uses bearer
-tokens obtained once by a human.
-
-Token lifecycle and auto-refresh:
+The original `MujyKun/Weverse` library is dead: its login endpoint replies
+`-10004` to everything and its content host no longer resolves in DNS.
+`gateway.py` implements the current contract instead - reads go through the
+Naver gateway with an HMAC-SHA1 request signature over
+`(short_path + "?" + sorted_query)[:255] + wmsgpad`, with `wmd` travelling as an
+ordinary parameter so the wire order equals the signed order.
 
 | Token | Lifetime | Notes |
 |---|---|---|
@@ -125,56 +132,90 @@ Token lifecycle and auto-refresh:
 
 - Cold start with only a refresh token: exchanged for a fresh pair first.
 - Any 401: one automatic refresh + retry inside the same call.
-- When the whole token family is revoked (e.g. refreshed too often in
-  probes, error `-10019`): re-login in a browser and copy the fresh
-  `we2_access_token` / `we2_refresh_token` / `we2_device_id` cookies into
-  `.env`. `bootstrap_login.py` (repo root) is the alternative OTP login
-  flow: `--request-otp` then `--verify-code <code>`.
+- HTTP 404 on the NOTICE tab is permanent, not transient: some communities
+  (MONSTA X, ATEEZ) expose no notice feed at all, and the message says so
+  instead of inviting a retry.
+- Whole token family revoked (error `-10019`): re-login in a browser and copy
+  the fresh `we2_access_token` / `we2_refresh_token` / `we2_device_id` cookies
+  into `.env`. `bootstrap_login.py` is the alternative OTP flow.
+- `get_notice_service()` shares one client per process so the rotated token is
+  reused instead of paying a refresh cycle per call.
 
-### Ticketmaster (tools/integrations/ticketmaster)
+### Ticketmaster (`tools/common/ticketmaster.py`)
 
-Discovery API v2 with a free key (`TICKETMASTER_API_KEY`, 5000
-requests/day, in-process response cache). Events are searched with
-`classificationName=Music` in Discovery's own relevance order (date sorting
-buries the artist's real tour under title matches), and `extract_events`
-keeps only events whose published `attractions` match the keyword. It shapes
-name, dates, timezone, venue, headliners, public on-sale time, presale
-windows, ticket limit and the official purchase URL, skipping malformed
-entries and tolerating the missing `priceRanges` that most K-pop events
-report.
+Free key (`TICKETMASTER_API_KEY`, 5000 requests/day, in-process response
+cache). Three measured constraints shape the tool:
+
+- **`priceRanges` is absent for K-pop**, in the US and in Europe alike, so
+  prices are reported as null and the prompt forbids estimating them. On-sale
+  times, presale windows and ticket limits are always present.
+- **Keyword search also matches event titles.** For the artist TEN,
+  date-sorted Discovery returned "Mt. Joy 2026: Celebrating 10 Years" and
+  "Chance The Rapper - Coloring Book 10 Year Anniversary" as the first ten
+  hits. Results are therefore filtered against `attractions`, and single-word
+  keywords must match an attraction exactly.
+- **Coverage is territorial.** Verified for aespa: US, CA, GB, DE, NL, IT, ES,
+  SE return events; KR, JP, HK, TW, SG, MY, PH, ID, AU return nothing, because
+  Ticketmaster does not sell in those markets (Korea uses Interpark / Yes24 /
+  Melon Ticket, Japan uses e+ / Lawson). An empty result is an honest answer,
+  and the notice names the real channel.
+
+### Event classification (`tools/common/classify.py`)
+
+Deterministic, tiered, bilingual. The title decides; the body is consulted only
+when the title carries no signal, and with a deliberately narrower hint list.
+Six labels in priority order: `online_event`, `popup`, `fan_event`,
+`merchandise`, `ticketed_event`, else `announcement`. Only `ticketed_event`
+sets `ticket_relevant`.
+
+Why tiering rather than one scan: bodies are long and full of boilerplate. A
+BTS legal-action notice mentions "ticket"; a Korean pre-recording notice
+recites ticket and reservation wording; a tour merchandise notice contains
+"tour". Scanning title and body together turned all of them into ticketed
+events, and titles alone missed notices whose type appears only in the body.
+`생방송` is a body-tier hint only because pre-recording notices are caught by
+their titles first.
+
+Live effect on aespa's 86 in-window notices: 45 labels from the title, 6 from
+the body, 35 announcements, 10 ticketed. Before tiering, 18 were labeled
+ticketed (11 wasted Ticketmaster searches). Re-check the mix against a live
+artist before trusting any hint-list change.
 
 ## 5. Chatbot integration
 
-- The harness (`app.py`, unchanged course pattern) passes `TOOLS` to the
-  model and executes requests through `run_tool`. The system prompt tells
-  the model that `event_type` is a heuristic pre-label it may override using
-  the excerpt, to call `read_weverse_notice` rather than guess when an answer
-  turns on detail the excerpt cannot hold (at most three notices per answer,
-  never quote a notice it did not read), to treat `matched_count: 0` as an
-  honest "not on Ticketmaster", to state a price only when one appears in text
-  it actually read, and to attribute every fact to its source URL.
-- Suggested demo questions (all verified against the live sources):
-  - "What aespa tour dates are on sale in the US, and when do tickets open?"
-  - "What exactly does the aespa presale notice say about membership
-    requirements?" (drives `plan_offline_attendance` then `read_weverse_notice`)
+`app.py` passes `TOOLS` to the model and executes requests through `run_tool`.
+The system prompt tells the model to start from the notices, treat `event_type`
+as a heuristic pre-label it may override using the excerpt, call
+`search_ticketmaster_events` only for `ticket_relevant` notices, read a notice
+in full rather than guess when detail exceeds the excerpt, state a price only
+when one appears in text it actually read, and attribute every fact to its
+source URL.
+
+- Demo questions (all verified against the live sources):
+  - "What aespa US tour dates are on sale, and when do tickets open?"
+  - "What exactly does the aespa presale notice say about who can join?"
+    (drives a search, then `read_weverse_notice`)
   - "Search YOASOBI notices from the last year for pop-up events."
   - "I want to see NCT TEN live - help me plan."
-  - Note: MONSTA X and ATEEZ are not usable demos - their Weverse communities
-    expose no NOTICE feed, so the tool correctly returns `community_not_joined`.
 - Deploy note (Cloud Run): inject `WEVERSE_ACCESS_TOKEN`,
-  `WEVERSE_REFRESH_TOKEN`, `TICKETMASTER_API_KEY` via `--set-env-vars` or
-  Secret Manager; never bake secrets into the image. The token persistence
-  writes only to the local `.env` and degrades gracefully on read-only
-  filesystems.
+  `WEVERSE_REFRESH_TOKEN`, `TICKETMASTER_API_KEY` and `GOOGLE_CLOUD_PROJECT`
+  via `--set-env-vars` or Secret Manager; never bake secrets into the image.
+  The refresh-token persistence writes only to the local `.env` and degrades
+  gracefully on a read-only filesystem.
+- `/bench` is a local tool test page that runs `run_tool` directly with no
+  model in the loop. It stays behind `KPOP_DEBUG_UI=1` because an open
+  tool-execution endpoint would let any visitor spend the Ticketmaster quota.
 
 ## 6. Testing
 
 ```powershell
-python -m pytest -q                                           # mocked only, no network
-python -m pytest -m "live_weverse or live_ticketmaster" -q -s # both real sources
+python -m pytest -q                                            # mocked suite
+python -m pytest -m "live_weverse or live_ticketmaster" -q -s  # real sources
 ```
 
-`tests/test_live_e2e.py::test_live_full_chain_single_tool_call` stubs the
-LLM and drives `app.run_agent` through the real registry and both live
-sources, so the entire production path is verified except the model vendor
-call itself.
+`tests/test_classify.py` covers the classifier, `tests/test_weverse_tool.py`
+the original tool's annotation and envelopes, `tests/test_weverse_notice.py`
+the gateway and service, `tests/test_ticketmaster.py` the common tool, and
+`tests/test_live_e2e.py` the live paths - including a stubbed-LLM test that
+drives `run_agent` through search -> ticketmaster -> read against both real
+APIs, which is what proves the model really can compose the split tools.

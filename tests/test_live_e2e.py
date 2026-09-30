@@ -1,10 +1,10 @@
-"""Live end-to-end tests for the offline-planning tool.
+"""Live tests: the real tools against the real Weverse gateway and Ticketmaster.
 
     python -m pytest -m "live_weverse or live_ticketmaster" -q -s
 
-Exercises the real runtime path: run_tool -> tools/offline_planning ->
-both live integrations -> merged envelope; plus the full agent chain with a
-stubbed LLM. Read-only; prints notice titles and event names.
+These need a configured .env and are deselected by default. They cover what the
+mocked tests cannot: that the upstream schemas still match, and that the split
+architecture really lets the model compose two sources in one answer.
 """
 
 import json
@@ -16,13 +16,20 @@ import app
 from tools import run_tool
 
 
-def _require_credentials():
-    if not (
-        os.environ.get("WEVERSE_ACCESS_TOKEN") or os.environ.get("WEVERSE_REFRESH_TOKEN")
-    ):
+def _require_weverse():
+    if not (os.environ.get("WEVERSE_ACCESS_TOKEN") or os.environ.get("WEVERSE_REFRESH_TOKEN")):
         pytest.skip("Weverse tokens not configured")
+
+
+def _require_ticketmaster():
     if not os.environ.get("TICKETMASTER_API_KEY"):
         pytest.skip("TICKETMASTER_API_KEY not configured")
+
+
+def search(artist, **kwargs):
+    result = json.loads(run_tool("search_weverse_notices", {"artist": artist, **kwargs}))
+    assert result["ok"] is True, result
+    return result
 
 
 class _FakeFunction:
@@ -61,108 +68,135 @@ class _FakeResponse:
         self.choices = [type("Choice", (), {"message": message})()]
 
 
-@pytest.mark.live_weverse
-def test_live_offline_planning_envelope_yoasobi():
-    _require_credentials()
-    result = json.loads(run_tool("plan_offline_attendance", {"artist": "yoasobi"}))
-    assert result["ok"] is True, result
-    assert result["scanned_count"] > 0
-    assert result["notices"], "expected at least one in-window notice"
-    # every notice carries its own classification evidence, inline
-    assert all(
-        {"event_type", "matched_signal", "matched_field", "excerpt", "ticket_relevant"} <= set(n)
-        for n in result["notices"]
-    )
-    assert "decisions" not in result
-    # trace-safe summary keys present for the UI whitelist
-    assert {"ok", "scanned_count", "matched_count", "truncated"} <= set(result)
-    print("\nlive yoasobi pipeline:")
-    for notice in result["notices"][:4]:
-        print("  -", notice["published_at"][:10], f"[{notice['event_type']}]", notice["title"][:52])
-    print("  ticketmaster searched:", result["ticketmaster_searched"], "| events:", result["matched_count"])
-    for event in result["ticketmaster_events"][:3]:
-        print("  *", event["date"], event["name"][:48], "|", event.get("city"))
+def scripted_llm(script):
+    """A stub model that replays (content, tool_calls) turns and then answers."""
+    turns = iter(script)
 
-
-@pytest.mark.live_weverse
-def test_live_read_notice_after_planning():
-    """The full chain the two tools exist for: plan, then read one notice."""
-    _require_credentials()
-    plan = json.loads(run_tool("plan_offline_attendance", {"artist": "aespa"}))
-    assert plan["ok"] is True
-    target = plan["notices"][0]
-
-    read = json.loads(
-        run_tool("read_weverse_notice", {"artist": "aespa", "notice_id": target["notice_id"]})
-    )
-    assert read["ok"] is True, read
-    assert read["notice_id"] == target["notice_id"]
-    assert read["text"] and "<" not in read["text"]
-    # the trace must not carry the body it just fetched
-    assert app.safe_trace_result(json.dumps(read)) == {
-        "ok": True,
-        "truncated": read["truncated"],
-        "notice_id": read["notice_id"],
-        "text_chars": read["text_chars"],
-    }
-    print(f"\nlive read notice: {read['title'][:48]} | {read['text_chars']} chars, truncated={read['truncated']}")
-
-
-@pytest.mark.live_weverse
-def test_live_offline_planning_unknown_artist_is_structured():
-    _require_credentials()
-    result = json.loads(
-        run_tool("plan_offline_attendance", {"artist": "definitely-not-a-weverse-community-xyz"})
-    )
-    assert result["ok"] is False
-    assert result["error"] == "community_not_joined"
-    assert result["source"] == "weverse"
-
-
-@pytest.mark.live_weverse
-def test_live_full_chain_single_tool_call(monkeypatch):
-    """Stub LLM drives app.run_agent; the real single tool hits both live APIs."""
-    _require_credentials()
-    rounds = {"n": 0}
-
-    def fake_completion(**kwargs):
-        rounds["n"] += 1
-        if rounds["n"] == 1:
-            return _FakeResponse(
-                _FakeMessage(
-                    tool_calls=[
-                        _FakeToolCall(
-                            "call_e2e_1",
-                            "plan_offline_attendance",
-                            json.dumps({"artist": "yoasobi"}),
-                        )
-                    ]
-                )
-            )
+    def completion(**kwargs):
+        turn = next(turns, None)
+        if turn is None:
+            return _FakeResponse(_FakeMessage(content="Done."))
+        content, calls = turn
         return _FakeResponse(
-            _FakeMessage(content="Here is the offline plan based on notices and Ticketmaster.")
+            _FakeMessage(
+                content=content,
+                # Providers hand back arguments as a JSON string, and the
+                # harness parses it, so the stub must match that shape.
+                tool_calls=[
+                    _FakeToolCall(f"call_{i}", name, json.dumps(args)) for i, (name, args) in enumerate(calls)
+                ],
+            )
         )
 
-    monkeypatch.setattr(app.litellm, "completion", fake_completion)
+    return completion
 
-    messages = [
-        {"role": "system", "content": app.SYSTEM_PROMPT},
-        {"role": "user", "content": "Does YOASOBI have any events or ticket sales coming up?"},
+
+# --- single tools ---------------------------------------------------------------
+
+
+@pytest.mark.live_weverse
+def test_live_search_annotates_real_notices():
+    _require_weverse()
+    result = search("aespa")
+
+    assert result["scanned_count"] > 0
+    assert result["notices"], "expected at least one in-window notice"
+    assert result["notice_count"] == len(result["notices"])
+    assert all({"event_type", "matched_signal", "matched_field", "excerpt", "ticket_relevant"} <= set(n) for n in result["notices"])
+    assert all("text" not in n for n in result["notices"]), "the list must stay a digest"
+    assert any(n["event_type"] == "ticketed_event" for n in result["notices"])
+    print("\nlive aespa notices:", result["notice_count"], "of", result["matched_count"], "in window")
+    for notice in result["notices"][:4]:
+        print("  -", notice["published_at"][:10], f"[{notice['event_type']}]", notice["title"][:52])
+
+
+@pytest.mark.live_weverse
+def test_live_read_one_notice_in_full():
+    _require_weverse()
+    notices = search("aespa")["notices"]
+    result = json.loads(run_tool("read_weverse_notice", {"artist": "aespa", "notice_id": notices[0]["notice_id"]}))
+
+    assert result["ok"] is True
+    assert result["notice_id"] == notices[0]["notice_id"]
+    assert result["text"] and "<" not in result["text"]
+    assert result["text_chars"] >= len(result["text"])
+    print(f"\nlive read: {result['title'][:48]} | {result['text_chars']} chars")
+
+
+@pytest.mark.live_weverse
+def test_live_community_without_a_notice_feed_is_structured():
+    _require_weverse()
+    result = json.loads(run_tool("search_weverse_notices", {"artist": "MONSTA X"}))
+    assert result["ok"] is False
+    assert result["error"] == "community_not_joined"
+    assert "no notice feed" in result["message"]
+
+
+@pytest.mark.live_weverse
+def test_live_unknown_artist_is_structured():
+    _require_weverse()
+    result = json.loads(run_tool("search_weverse_notices", {"artist": "definitely-not-a-weverse-community-xyz"}))
+    assert result["ok"] is False
+    assert result["error"] == "community_not_joined"
+
+
+@pytest.mark.live_ticketmaster
+def test_live_ticketmaster_only_returns_the_artist_own_events():
+    _require_ticketmaster()
+    result = json.loads(run_tool("search_ticketmaster_events", {"keyword": "aespa", "country_code": "US"}))
+    assert result["ok"] is True
+    assert result["matched_count"] > 0, "aespa is on sale in the US right now"
+    for event in result["events"]:
+        assert any("aespa" in name.casefold() for name in event["attractions"]), event["attractions"]
+        assert event["venue"] and event["url"]
+    print("\nlive ticketmaster:", result["matched_count"], "aespa events")
+    for event in result["events"][:3]:
+        print("  *", event["date"], event["name"][:46], "|", event["venue"])
+
+
+# --- the model composing both sources -------------------------------------------
+
+
+@pytest.mark.live_weverse
+@pytest.mark.live_ticketmaster
+def test_live_model_composes_notices_then_ticketmaster(monkeypatch):
+    """The split architecture's whole point, against both live APIs.
+
+    Notices first, then a Ticketmaster lookup for the ticketed ones, then a
+    notice read - three calls the model decides on, none orchestrated in code.
+    """
+    _require_weverse()
+    _require_ticketmaster()
+
+    notices = search("aespa")
+    ticketed = next(n for n in notices["notices"] if n["ticket_relevant"])
+
+    completion = scripted_llm(
+        [
+            (None, [("search_weverse_notices", {"artist": "aespa"})]),
+            (None, [("search_ticketmaster_events", {"keyword": "aespa", "country_code": "US"})]),
+            (None, [("read_weverse_notice", {"artist": "aespa", "notice_id": ticketed["notice_id"]})]),
+            ("Here is the plan.", []),
+        ]
+    )
+    monkeypatch.setattr(app.litellm, "completion", completion)
+
+    text, trace = app.run_agent(
+        [
+            {"role": "system", "content": app.SYSTEM_PROMPT},
+            {"role": "user", "content": "Help me plan attending an aespa show in the US."},
+        ]
+    )
+
+    assert text == "Here is the plan."
+    assert [entry["name"] for entry in trace] == [
+        "search_weverse_notices",
+        "search_ticketmaster_events",
+        "read_weverse_notice",
     ]
-    text, trace = app.run_agent(messages)
-
-    assert rounds["n"] == 2
-    assert text
-    assert len(trace) == 1, "the whole slice must be a single tool call"
-    entry = trace[0]
-    assert entry["name"] == "plan_offline_attendance"
-    assert entry["args"] == {"artist": "yoasobi"}
-    # The collapsed header keeps only the safe summary scalars...
-    assert entry["summary"]["ok"] is True
-    assert entry["summary"]["scanned_count"] > 0
-    assert "notices" not in entry["summary"] and "ticketmaster_events" not in entry["summary"]
-    # ...while the expandable panel carries the payload the model was given.
-    assert entry["result"]["ok"] is True
-    assert entry["result"]["notices"]
-    assert entry["elapsed_ms"] >= 0
-    print("\nfull chain ok: one tool call -> live notices + ticketmaster; summary:", entry["summary"])
+    assert all(entry["result"]["ok"] is True for entry in trace), trace
+    # the collapsed header never carries bodies, the payload always does
+    assert all("notices" not in entry["summary"] and "text" not in entry["summary"] for entry in trace)
+    assert trace[0]["result"]["notices"] and trace[2]["result"]["text"]
+    assert trace[1]["result"]["matched_count"] > 0
+    print("\nlive orchestration ok:", [(e["name"], e["elapsed_ms"]) for e in trace])

@@ -162,25 +162,14 @@
                 add("payload", data.chars + " chars");
                 add("~tokens", Math.round(data.chars / 3.5));
                 if (typeof r.scanned_count === "number") add("scanned", r.scanned_count);
-                if (typeof r.notice_count === "number") add("classified", r.notice_count);
-                if (typeof r.notice_matched === "number") add("in window", r.notice_matched);
-                if (typeof r.matched_count === "number") add("TM events", r.matched_count);
+                if (typeof r.notice_count === "number") add("returned", r.notice_count);
+                if (typeof r.matched_count === "number") add("matched", r.matched_count);
+                if (typeof r.text_chars === "number") add("chars", r.text_chars);
                 return stats;
             }
 
-            function renderPlan(data) {
+            function renderNoticeSearch(data) {
                 const r = data.result || {};
-                if (!r.ok) {
-                    const box = el("div", "error");
-                    box.append(
-                        el("p", null, "Source: " + (r.source || "?")),
-                        el("p", null, ""),
-                        el("code", null, r.error || "unknown"),
-                        el("p", null, r.message || "")
-                    );
-                    summary.append(box);
-                    return;
-                }
                 summary.append(renderStats(data));
 
                 summary.append(el("h2", null, "Notices (" + (r.notices || []).length + ")"));
@@ -212,48 +201,40 @@
                     summary.append(card);
                 }
 
-                const events = r.ticketmaster_events || [];
-                summary.append(el("h2", null, "Ticketmaster (" + events.length + ")"));
+            }
+
+            function renderEvents(r) {
+                const events = r.events || [];
+                summary.append(el("h2", null, "Events (" + events.length + ")"));
                 if (!events.length) {
-                    summary.append(el("p", "hint", "No Ticketmaster events matched. searched: " + JSON.stringify(r.ticketmaster_searched)));
-                } else {
-                    const table = el("table");
-                    const head = el("tr");
-                    for (const h of ["date", "event", "venue / city", "on sale", "presales", "limit", "price", "buy"]) head.append(el("th", null, h));
-                    table.append(head);
-                    for (const e of events) {
-                        const row = el("tr");
-                        row.append(
-                            el("td", null, e.date + " " + (e.time || "").slice(0, 5)),
-                            el("td", null, e.name),
-                            el("td", null, (e.venue || "-") + ", " + (e.city || "-") + " (" + (e.country || "-") + ")"),
-                            el("td", null, e.public_on_sale_at || "-"),
-                            el("td", null, (e.presale_windows || []).map((p) => p.name).join(", ") || "-"),
-                            el("td", null, e.ticket_limit ? e.ticket_limit.slice(0, 60) : "-"),
-                            el("td", null, e.price_min == null ? "not published" : e.price_min + "-" + e.price_max + " " + e.currency),
-                            el("td", null)
-                        );
-                        if (e.url) row.lastChild.append(link(e.url, "link"));
-                        table.append(row);
-                    }
-                    summary.append(table);
+                    summary.append(el("p", "hint", "Nothing matched. An empty result is an honest answer, not a failure."));
+                    return;
                 }
-                if (r.ticketmaster_error) {
-                    const box = el("div", "error");
-                    box.append(el("code", null, r.ticketmaster_error.error), el("p", null, r.ticketmaster_error.message + " (notices above are still valid)"));
-                    summary.append(box);
+                const table = el("table");
+                const head = el("tr");
+                for (const h of ["date", "event", "venue / city", "on sale", "presales", "limit", "price", "buy"]) head.append(el("th", null, h));
+                table.append(head);
+                for (const e of events) {
+                    const row = el("tr");
+                    row.append(
+                        el("td", null, e.date + " " + (e.time || "").slice(0, 5)),
+                        el("td", null, e.name),
+                        el("td", null, (e.venue || "-") + ", " + (e.city || "-") + " (" + (e.country || "-") + ")"),
+                        el("td", null, e.public_on_sale_at || "-"),
+                        el("td", null, (e.presale_windows || []).map((p) => p.name).join(", ") || "-"),
+                        el("td", null, e.ticket_limit ? e.ticket_limit.slice(0, 60) : "-"),
+                        el("td", null, e.price_min == null ? "not published" : e.price_min + "-" + e.price_max + " " + e.currency),
+                        el("td", null)
+                    );
+                    if (e.url) row.lastChild.append(link(e.url, "link"));
+                    table.append(row);
                 }
+                summary.append(table);
             }
 
             function renderRead(data) {
                 const r = data.result || {};
                 summary.append(renderStats(data));
-                if (!r.ok) {
-                    const box = el("div", "error");
-                    box.append(el("code", null, r.error), el("p", null, r.message || ""));
-                    summary.append(box);
-                    return;
-                }
                 const card = el("div", "notice");
                 card.append(el("div", "row", null));
                 card.firstChild.append(el("span", "badge", "#" + r.notice_id), el("span", "title", r.title));
@@ -263,18 +244,36 @@
                 summary.append(card);
             }
 
+            function renderError(data, r) {
+                summary.append(renderStats(data));
+                const box = el("div", "error");
+                box.append(
+                    el("code", null, r.error || "error"),
+                    el("p", null, (r.source ? r.source + ": " : "") + (r.message || ""))
+                );
+                summary.append(box);
+            }
+
+            // Dispatch on the shape of the envelope, not on the tool name, so a
+            // new common tool renders without touching this page.
             function render(data) {
+                const r = data.result || {};
                 summary.innerHTML = "";
-                summary.append(el("h2", null, data.name + " -> " + JSON.stringify(data.args)));
-                if (data.name === "plan_offline_attendance") renderPlan(data);
-                else if (data.name === "read_weverse_notice") renderRead(data);
-                else {
+                if (!r.ok) {
+                    renderError(data, r);
+                } else if (Array.isArray(r.notices)) {
+                    renderNoticeSearch(data);
+                    if (Array.isArray(r.events)) renderEvents(r);
+                } else if (Array.isArray(r.events)) {
                     summary.append(renderStats(data));
-                    const pre = el("pre");
-                    pre.textContent = JSON.stringify(data.result, null, 2);
-                    summary.append(pre);
+                    renderEvents(r);
+                } else if (typeof r.text === "string") {
+                    renderRead(data);
+                } else {
+                    summary.append(renderStats(data));
+                    summary.append(el("pre", null, JSON.stringify(r, null, 2)));
                 }
-                raw.textContent = JSON.stringify(data.result, null, 2);
+                raw.textContent = JSON.stringify(r, null, 2);
                 document.getElementById("raw-wrap").open = false;
             }
 
