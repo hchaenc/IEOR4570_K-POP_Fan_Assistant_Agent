@@ -1,6 +1,7 @@
 .env
 password.txt
 credentials.txt
+gcp-project.txt
 .weverse_otp_session.json
 *.token
 *.cookie

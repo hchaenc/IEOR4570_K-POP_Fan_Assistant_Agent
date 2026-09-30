@@ -459,11 +459,10 @@ def test_signed_request_includes_signature_params():
 
 
 def test_gateway_internals_are_not_registered_as_tools():
-    """Only the two Weverse tools face the model; the client and service do not."""
-    assert "search_weverse_notices" in TOOL_MAP
-    assert "read_weverse_notice" in TOOL_MAP
-    assert "WeverseGatewayClient" not in TOOL_MAP
-    assert "search_notices" not in TOOL_MAP
+    """Only weverse_notices faces the model; the client and service do not."""
+    assert "weverse_notices" in TOOL_MAP
+    for internal in ("WeverseGatewayClient", "WeverseNoticeService", "search_notices", "read_notice"):
+        assert internal not in TOOL_MAP
 
 
 # --- progressive disclosure: read one notice in full -----------------------------

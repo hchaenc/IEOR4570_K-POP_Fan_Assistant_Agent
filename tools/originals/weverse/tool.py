@@ -1,13 +1,14 @@
-"""Model-facing Weverse notice tools.
+"""Model-facing Weverse notice tool.
 
-`search_weverse_notices` returns an artist's in-window notices annotated with
-an event type and the evidence behind that label; `read_weverse_notice`
-returns the full text of one notice. Together they are progressive disclosure:
-a compact digest first, the raw body only when the answer needs it.
+One original tool, two modes, selected by whether `notice_id` is present:
 
-This is an original tool: it returns annotated data from its own source and
-performs no cross-source orchestration. Whether to spend a Ticketmaster request
-is the model's call, informed by `ticket_relevant`.
+  weverse_notices(artist)                    -> the annotated digest
+  weverse_notices(artist, notice_id="36316") -> that notice's full text
+
+Both responses carry a `mode` field so the shape is self-describing rather
+than something the model has to infer. The digest is the cheap default; the
+full text is opt-in, because all 86 aespa bodies would cost ~42,000 tokens on
+every later turn of the session.
 """
 
 import json
@@ -59,53 +60,55 @@ def annotate_notice(notice: dict) -> dict:
     }
 
 
-def search_weverse_notices(
+def weverse_notices(
     artist: str,
     query: str | None = None,
     limit: int | None = DEFAULT_NOTICE_LIMIT,
+    notice_id: str | None = None,
+    max_chars: int | None = DEFAULT_READ_CHARS,
 ) -> str:
-    """Official notices for one artist, annotated with event type and evidence."""
-    result = get_notice_service().search_notices(
-        artist=(artist.strip() if isinstance(artist, str) else ""),
+    """An artist's official notices, or one notice from that list in full."""
+    service = get_notice_service()
+    normalized_artist = artist.strip() if isinstance(artist, str) else ""
+
+    if isinstance(notice_id, str) and notice_id.strip():
+        result = service.read_notice(normalized_artist, notice_id.strip(), max_chars)
+        if result.get("ok"):
+            result["mode"] = "full_text"
+        return json.dumps(result, ensure_ascii=False)
+
+    result = service.search_notices(
+        normalized_artist,
         query=(query.strip() if isinstance(query, str) and query.strip() else None),
         limit=limit,
     )
     if result.get("ok"):
         results = result.pop("results") or []
+        result["mode"] = "digest"
         result["notices"] = [annotate_notice(notice) for notice in results]
         result["notice_count"] = len(result["notices"])
     return json.dumps(result, ensure_ascii=False)
 
 
-def read_weverse_notice(
-    artist: str,
-    notice_id: str,
-    max_chars: int | None = DEFAULT_READ_CHARS,
-) -> str:
-    """Fetch one notice's full text by the id a previous search reported."""
-    result = get_notice_service().read_notice(
-        artist=(artist.strip() if isinstance(artist, str) else ""),
-        notice_id=(str(notice_id).strip() if notice_id is not None else ""),
-        max_chars=max_chars,
-    )
-    return json.dumps(result, ensure_ascii=False)
-
-
-SEARCH_SCHEMA = {
+SCHEMA = {
     "type": "function",
     "function": {
-        "name": "search_weverse_notices",
+        "name": "weverse_notices",
         "description": (
-            "Search an artist's official Weverse notices from the last 365 "
-            "days. Returns each notice with its title, date, source URL, an "
-            "event_type (ticketed_event / popup / fan_event / merchandise / "
-            "online_event / announcement), the word and field that produced "
-            "that label, a short evidence excerpt, and ticket_relevant. Start "
-            "here for any question about announcements, tours, concerts, fan "
-            "meetings or pop-ups. Only ticket_relevant notices usually warrant "
-            "a search_ticketmaster_events call: pop-up stores and "
-            "membership-application events are not sold on Ticketmaster, so "
-            "use the channel named in the notice instead."
+            "Read an artist's official Weverse notices. Two modes. Without "
+            "notice_id: returns the last 365 days as a digest, each notice "
+            "carrying title, date, source URL, an event_type (ticketed_event / "
+            "popup / fan_event / merchandise / online_event / announcement), "
+            "the word and field that produced that label, a short evidence "
+            "excerpt, and ticket_relevant. With notice_id: returns that one "
+            "notice's full text. Start with the digest; re-call with a "
+            "notice_id whenever the answer turns on detail the excerpt cannot "
+            "hold - exact dates and times, application windows, membership "
+            "requirements, prices, or a sale channel. event_type is a "
+            "heuristic pre-label: check it against the excerpt and trust the "
+            "excerpt when they disagree. Only ticket_relevant notices usually "
+            "warrant a search_ticketmaster_events call, since pop-up stores and "
+            "membership-application events are not sold on Ticketmaster."
         ),
         "parameters": {
             "type": "object",
@@ -121,16 +124,34 @@ SEARCH_SCHEMA = {
                 "query": {
                     "type": ["string", "null"],
                     "description": (
-                        "Optional keyword filter across notice titles and "
-                        "text, e.g. 'presale'."
+                        "Digest mode only: optional keyword filter across "
+                        "notice titles and text, e.g. 'presale'."
                     ),
                 },
                 "limit": {
                     "type": ["integer", "null"],
                     "description": (
-                        f"Optional cap on returned notices, newest first. "
-                        f"Defaults to {DEFAULT_NOTICE_LIMIT}, which covers the "
-                        "whole 365-day window for most artists."
+                        f"Digest mode only: optional cap on returned notices, "
+                        f"newest first. Defaults to {DEFAULT_NOTICE_LIMIT}, "
+                        "which covers the whole 365-day window for most "
+                        "artists."
+                    ),
+                },
+                "notice_id": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Full-text mode: a notice_id copied verbatim from the "
+                        "digest's notices[]. Leave it out to get the digest. "
+                        "Never invent or modify one."
+                    ),
+                },
+                "max_chars": {
+                    "type": ["integer", "null"],
+                    "description": (
+                        f"Full-text mode only: character budget for the "
+                        f"returned text. Defaults to {DEFAULT_READ_CHARS} and "
+                        f"cannot exceed {MAX_READ_CHARS}; the response reports "
+                        "the real length in text_chars."
                     ),
                 },
             },
@@ -139,51 +160,4 @@ SEARCH_SCHEMA = {
     },
 }
 
-READ_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "read_weverse_notice",
-        "description": (
-            "Read the full text of one official Weverse notice. Use it after "
-            "search_weverse_notices whenever the answer needs detail the "
-            "excerpt cannot hold: exact dates and times, application windows, "
-            "membership requirements, prices, or a sale channel. Copy the "
-            "notice_id verbatim from the notices list, read at most three "
-            "notices per answer, and never quote a notice you did not read."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "artist": {
-                    "type": "string",
-                    "description": (
-                        "The same artist value used in search_weverse_notices."
-                    ),
-                },
-                "notice_id": {
-                    "type": "string",
-                    "description": (
-                        "notice_id copied verbatim from notices[]. Do not "
-                        "invent or modify one."
-                    ),
-                },
-                "max_chars": {
-                    "type": ["integer", "null"],
-                    "description": (
-                        f"Optional character budget for the returned text. "
-                        f"Defaults to {DEFAULT_READ_CHARS} and cannot exceed "
-                        f"{MAX_READ_CHARS}; the response reports the real "
-                        "length in text_chars."
-                    ),
-                },
-            },
-            "required": ["artist", "notice_id"],
-        },
-    },
-}
-
-SCHEMAS = [SEARCH_SCHEMA, READ_SCHEMA]
-HANDLERS = {
-    "search_weverse_notices": search_weverse_notices,
-    "read_weverse_notice": read_weverse_notice,
-}
+HANDLER = weverse_notices

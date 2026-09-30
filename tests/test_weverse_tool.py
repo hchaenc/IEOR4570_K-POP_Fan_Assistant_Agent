@@ -68,17 +68,19 @@ def use_notices(monkeypatch, notices, resolver=None):
 # --- registry -------------------------------------------------------------------
 
 
-def test_registry_exposes_the_split_tools_and_not_the_old_composite():
+def test_registry_exposes_one_original_tool_and_the_common_tool():
     names = sorted(TOOL_MAP)
-    assert names == ["read_weverse_notice", "search_ticketmaster_events", "search_weverse_notices"]
-    assert "plan_offline_attendance" not in TOOL_MAP
+    assert names == ["search_ticketmaster_events", "weverse_notices"]
+    # Neither the old composite nor the two-function split survives the merge.
+    for retired in ("plan_offline_attendance", "search_weverse_notices", "read_weverse_notice"):
+        assert retired not in TOOL_MAP
     assert sorted(tool["function"]["name"] for tool in TOOLS) == names
 
 
-def test_placeholder_packages_register_nothing_yet():
-    """Teammate slots must not put empty shells in front of the model."""
-    assert all(len(tool["function"]["name"]) > 0 for tool in TOOLS)
-    assert not any(name.startswith(("stage_", "lyrics_")) for name in TOOL_MAP)
+def test_empty_packages_are_skipped_by_the_registry():
+    """A teammate's bare directory must not put an empty shell in front of the model."""
+    assert all(tool["function"]["name"] in TOOL_MAP for tool in TOOLS)
+    assert all(callable(handler) for handler in TOOL_MAP.values())
 
 
 # --- annotation -----------------------------------------------------------------
@@ -92,7 +94,7 @@ def test_search_annotates_each_notice_and_drops_the_full_body(monkeypatch):
             {"id": 2, "title": "[공지] aespa FANLIGHT EMBLEM ONLINE SALES", "body": "official merchandise sales open Friday"},
         ],
     )
-    result = json.loads(run_tool("search_weverse_notices", {"artist": "aespa"}))
+    result = json.loads(run_tool("weverse_notices", {"artist": "aespa"}))
 
     assert result["ok"] is True
     assert result["notice_count"] == 2
@@ -113,14 +115,14 @@ def test_search_annotates_each_notice_and_drops_the_full_body(monkeypatch):
             "ticket_relevant",
             "excerpt",
         }
-        assert "text" not in notice, "the full body belongs to read_weverse_notice, not the list"
+        assert "text" not in notice, "the full body belongs to full-text mode, not the digest"
 
 
 def test_excerpt_for_a_body_label_is_centered_on_the_signal(monkeypatch):
     body = "Hello, thank you for your support. " * 30 + "Official merchandise sales open Friday."
     use_notices(monkeypatch, [{"id": 5, "title": "Sales information", "body": body}])
 
-    notice = json.loads(run_tool("search_weverse_notices", {"artist": "aespa"}))["notices"][0]
+    notice = json.loads(run_tool("weverse_notices", {"artist": "aespa"}))["notices"][0]
     assert notice["matched_field"] == "body"
     assert "merchandise" in notice["excerpt"], "a head excerpt would show only greetings"
     assert len(notice["excerpt"]) <= 200
@@ -131,7 +133,7 @@ def test_excerpt_for_a_title_label_is_the_head_of_the_body(monkeypatch):
         monkeypatch,
         [{"id": 6, "title": "Ticket Reservation & Admission", "body": "Doors open at 6 PM at the arena."}],
     )
-    notice = json.loads(run_tool("search_weverse_notices", {"artist": "aespa"}))["notices"][0]
+    notice = json.loads(run_tool("weverse_notices", {"artist": "aespa"}))["notices"][0]
     assert notice["excerpt"].startswith("Doors open at 6 PM")
 
 
@@ -147,7 +149,7 @@ def test_feed_stays_smaller_than_the_old_composite_envelope(monkeypatch):
             for i in range(86)
         ],
     )
-    payload = run_tool("search_weverse_notices", {"artist": "aespa"})
+    payload = run_tool("weverse_notices", {"artist": "aespa"})
     assert len(payload) < 47_387
 
 
@@ -160,7 +162,7 @@ def test_query_filter_and_limit_pass_through(monkeypatch):
             {"id": 3, "title": "Another ticket notice", "body": "b"},
         ],
     )
-    result = json.loads(run_tool("search_weverse_notices", {"artist": "aespa", "query": "ticket", "limit": 1}))
+    result = json.loads(run_tool("weverse_notices", {"artist": "aespa", "query": "ticket", "limit": 1}))
     assert result["matched_count"] == 2, "matched_count reports the whole match set"
     assert [n["title"] for n in result["notices"]] == ["Another ticket notice"] or len(result["notices"]) == 1
 
@@ -170,15 +172,25 @@ def test_query_filter_and_limit_pass_through(monkeypatch):
 
 def test_unknown_artist_returns_a_structured_error_string(monkeypatch):
     use_notices(monkeypatch, [], resolver={})
-    result = json.loads(run_tool("search_weverse_notices", {"artist": "not-a-community"}))
+    result = json.loads(run_tool("weverse_notices", {"artist": "not-a-community"}))
     assert result["ok"] is False
     assert result["error"] == "community_not_joined"
     assert isinstance(result["message"], str) and result["message"]
 
 
 def test_missing_required_argument_does_not_crash_the_loop():
-    assert json.loads(run_tool("search_weverse_notices", {}))["error"] == "bad_arguments"
-    assert json.loads(run_tool("read_weverse_notice", {"artist": "aespa"}))["error"] == "bad_arguments"
+    assert json.loads(run_tool("weverse_notices", {}))["error"] == "bad_arguments"
+
+
+def test_mode_names_which_shape_came_back(monkeypatch):
+    """One function, two response shapes: the mode field tells them apart."""
+    use_notices(monkeypatch, [{"id": 9, "title": "Tour", "body": "Ticket sales open soon."}])
+
+    digest = json.loads(run_tool("weverse_notices", {"artist": "aespa"}))
+    assert digest["mode"] == "digest" and "notices" in digest and "text" not in digest
+
+    full = json.loads(run_tool("weverse_notices", {"artist": "aespa", "notice_id": "9"}))
+    assert full["mode"] == "full_text" and "text" in full and "notices" not in full
 
 
 # --- read -----------------------------------------------------------------------
@@ -188,7 +200,7 @@ def test_read_returns_the_full_text_and_reports_truncation(monkeypatch):
     long_body = "<p>" + ("Application window opens 6 May, 10:00 KST. " * 120) + "</p>"
     use_notices(monkeypatch, [{"id": 42, "title": "Presale", "body": long_body}])
 
-    result = json.loads(run_tool("read_weverse_notice", {"artist": "aespa", "notice_id": "42"}))
+    result = json.loads(run_tool("weverse_notices", {"artist": "aespa", "notice_id": "42"}))
     assert result["ok"] is True
     assert result["notice_id"] == "42"
     assert result["text"].startswith("Application window opens")
@@ -199,6 +211,6 @@ def test_read_returns_the_full_text_and_reports_truncation(monkeypatch):
 
 def test_read_reuses_the_searched_artist_name(monkeypatch):
     use_notices(monkeypatch, [{"id": 43, "title": "Tour", "body": "Ticket sales open soon."}])
-    result = json.loads(run_tool("read_weverse_notice", {"artist": "MONSTA X", "notice_id": "43"}))
+    result = json.loads(run_tool("weverse_notices", {"artist": "MONSTA X", "notice_id": "43"}))
     assert result["ok"] is True
     assert result["artist"] == "MONSTA X"

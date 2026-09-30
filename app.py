@@ -1,3 +1,4 @@
+import argparse
 import json
 import logging
 import os
@@ -26,39 +27,65 @@ logger = logging.getLogger("kpop-assistant")
 
 MODEL = os.environ.get("KPOP_ASSISTANT_MODEL", "vertex_ai/gemini-3.5-flash-lite")
 VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "global")
+
+# Which GCP project pays for the Vertex AI calls. Three sources, most explicit
+# first, because the answer differs per person: gcloud bills the *quota
+# project*, not the account that logged in, so a teammate who reuses this
+# project's ID runs up the owner's bill.
+GCP_PROJECT_FILE = "gcp-project.txt"
+
+
+def _read_project_file() -> str | None:
+    """A project ID in a plain text file, kept outside the repo the way
+    password.txt and ticketmaster-api.txt already are."""
+    here = Path(__file__).parent
+    for candidate in (here / GCP_PROJECT_FILE, here.parent / GCP_PROJECT_FILE):
+        if candidate.is_file():
+            value = candidate.read_text(encoding="utf-8").strip()
+            if value:
+                return value.splitlines()[0].strip()
+    return None
+
+
+def resolve_vertex_project(cli_value: str | None = None) -> str | None:
+    return (cli_value or os.environ.get("GOOGLE_CLOUD_PROJECT") or _read_project_file() or None)
+
+
 # Only meaningful for the vertex_ai provider; ignored by LiteLLM elsewhere.
-VERTEX_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT") or None
+VERTEX_PROJECT = resolve_vertex_project()
 
 SYSTEM_PROMPT = (
     "You are a K-pop fan assistant that helps fans attend real events: "
     "concerts, tours, fan meetings and pop-up stores.\n"
     "\n"
-    "Tools (use these names exactly): search_weverse_notices returns an "
-    "artist's official notices from "
-    "the last 365 days, each labeled with an event_type plus the evidence "
-    "behind the label (matched_signal, matched_field, excerpt). "
-    "read_weverse_notice returns one notice in full. "
+    "Tools (use these names exactly): weverse_notices reads an artist's "
+    "official Weverse notices in two modes - without notice_id it returns the "
+    "last 365 days as a digest where each notice carries an event_type "
+    "(ticketed_event / popup / fan_event / merchandise / online_event / "
+    "announcement), the word and field that produced that label, and a short "
+    "evidence excerpt; with notice_id it returns that one notice in full. "
     "search_ticketmaster_events returns venues, public on-sale times, presale "
     "windows, ticket limits and purchase links. Ask one concise clarification "
     "question if the artist is missing, and never invent notice content, "
     "dates, availability, prices or source URLs.\n"
     "\n"
-    "Combine them yourself, starting from the notices. Treat event_type as a "
-    "heuristic pre-label and check it against the excerpt: when they "
-    "disagree, trust the excerpt and say which notice you mean. Call "
-    "search_ticketmaster_events only for notices marked ticket_relevant, "
-    "passing the artist name exactly as the user typed it. Pop-up stores, "
-    "membership-application events and Korean or Japanese dates are usually "
-    "not on Ticketmaster at all, so an empty result is an honest answer and "
-    "the sale channel named in the notice is the better pointer. Read a "
-    "notice in full whenever the answer turns on detail the excerpt cannot "
-    "hold - exact times, application windows, membership requirements, prices "
-    "- and never quote a notice you did not read.\n"
+    "Combine them yourself, starting from the digest. Treat event_type as a "
+    "heuristic pre-label and check it against the excerpt: when they disagree, "
+    "trust the excerpt and say which notice you mean. Call weverse_notices "
+    "again with a notice_id whenever the answer turns on detail the excerpt "
+    "cannot hold - exact times, application windows, membership requirements, "
+    "prices - copy the id verbatim, read at most three notices per answer, and "
+    "never quote a notice you did not read. Call search_ticketmaster_events "
+    "only for notices marked ticket_relevant, passing the artist name exactly "
+    "as the user typed it. Pop-up stores, membership-application events and "
+    "Korean or Japanese dates are usually not on Ticketmaster at all, so an "
+    "empty result is an honest answer and the sale channel named in the notice "
+    "is the better pointer.\n"
     "\n"
     "Prices and seats: Ticketmaster reports no live inventory and publishes "
     "price ranges for only some events, so price_min and price_max are "
     "usually null. Point at the event link instead of estimating, and state a "
-    "price only when one appears in text you actually read.\n"
+    "price only when one appears in notice text you actually read.\n"
     "\n"
     "Report tool errors honestly (rate_limited, authentication_failed, "
     "community_not_joined, notice_not_found) with the corrective action the "
@@ -81,6 +108,7 @@ MAX_TOOL_ROUNDS = 8
 TRACE_ALLOWED_KEYS = (
     "ok",
     "error",
+    "mode",
     "scanned_count",
     "matched_count",
     "notice_count",
@@ -262,5 +290,24 @@ def bench_run(request: ToolRunRequest):
     }
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="K-pop fan assistant web server")
+    parser.add_argument(
+        "--gcp-project",
+        help=(
+            f"GCP project ID that pays for Vertex AI calls. Overrides "
+            f"GOOGLE_CLOUD_PROJECT and {GCP_PROJECT_FILE}."
+        ),
+    )
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8000)
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    _args = _parse_args()
+    if _args.gcp_project:
+        VERTEX_PROJECT = resolve_vertex_project(_args.gcp_project)
+    # Say it out loud: gcloud bills the quota project, not whoever logged in.
+    print(f"Vertex quota project: {VERTEX_PROJECT or 'unset (LiteLLM will fall back to ADC)'}")
+    uvicorn.run(app, host=_args.host, port=_args.port)

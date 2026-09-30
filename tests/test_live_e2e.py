@@ -27,7 +27,7 @@ def _require_ticketmaster():
 
 
 def search(artist, **kwargs):
-    result = json.loads(run_tool("search_weverse_notices", {"artist": artist, **kwargs}))
+    result = json.loads(run_tool("weverse_notices", {"artist": artist, **kwargs}))
     assert result["ok"] is True, result
     return result
 
@@ -114,7 +114,7 @@ def test_live_search_annotates_real_notices():
 def test_live_read_one_notice_in_full():
     _require_weverse()
     notices = search("aespa")["notices"]
-    result = json.loads(run_tool("read_weverse_notice", {"artist": "aespa", "notice_id": notices[0]["notice_id"]}))
+    result = json.loads(run_tool("weverse_notices", {"artist": "aespa", "notice_id": notices[0]["notice_id"]}))
 
     assert result["ok"] is True
     assert result["notice_id"] == notices[0]["notice_id"]
@@ -126,7 +126,7 @@ def test_live_read_one_notice_in_full():
 @pytest.mark.live_weverse
 def test_live_community_without_a_notice_feed_is_structured():
     _require_weverse()
-    result = json.loads(run_tool("search_weverse_notices", {"artist": "MONSTA X"}))
+    result = json.loads(run_tool("weverse_notices", {"artist": "MONSTA X"}))
     assert result["ok"] is False
     assert result["error"] == "community_not_joined"
     assert "no notice feed" in result["message"]
@@ -135,7 +135,7 @@ def test_live_community_without_a_notice_feed_is_structured():
 @pytest.mark.live_weverse
 def test_live_unknown_artist_is_structured():
     _require_weverse()
-    result = json.loads(run_tool("search_weverse_notices", {"artist": "definitely-not-a-weverse-community-xyz"}))
+    result = json.loads(run_tool("weverse_notices", {"artist": "definitely-not-a-weverse-community-xyz"}))
     assert result["ok"] is False
     assert result["error"] == "community_not_joined"
 
@@ -173,9 +173,9 @@ def test_live_model_composes_notices_then_ticketmaster(monkeypatch):
 
     completion = scripted_llm(
         [
-            (None, [("search_weverse_notices", {"artist": "aespa"})]),
+            (None, [("weverse_notices", {"artist": "aespa"})]),
             (None, [("search_ticketmaster_events", {"keyword": "aespa", "country_code": "US"})]),
-            (None, [("read_weverse_notice", {"artist": "aespa", "notice_id": ticketed["notice_id"]})]),
+            (None, [("weverse_notices", {"artist": "aespa", "notice_id": ticketed["notice_id"]})]),
             ("Here is the plan.", []),
         ]
     )
@@ -190,9 +190,9 @@ def test_live_model_composes_notices_then_ticketmaster(monkeypatch):
 
     assert text == "Here is the plan."
     assert [entry["name"] for entry in trace] == [
-        "search_weverse_notices",
+        "weverse_notices",
         "search_ticketmaster_events",
-        "read_weverse_notice",
+        "weverse_notices",
     ]
     assert all(entry["result"]["ok"] is True for entry in trace), trace
     # the collapsed header never carries bodies, the payload always does

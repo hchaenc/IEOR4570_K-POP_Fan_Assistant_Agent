@@ -40,11 +40,17 @@ mapping.
 
 ## Current packages
 
-| Package | Owner | Status |
+| Package | Owner | Model-facing tools |
 |---|---|---|
-| `weverse/` | offline planning | `search_weverse_notices`, `read_weverse_notice` |
-| `stage_videos/` | stage / MV slice | placeholder, registers nothing |
-| `song_lyrics/` | song / lyrics slice | placeholder, registers nothing |
+| `weverse/` | offline planning | `weverse_notices` |
+| _yours here_ | stage / MV slice | - |
+| _yours here_ | song / lyrics slice | - |
 
-Rename the placeholder directories to whatever fits your tool; the registry
-finds any package under `tools/originals/`.
+Nothing is scaffolded for you: create `tools/originals/<your_tool>/__init__.py`
+exposing `SCHEMAS` and `HANDLERS` and the registry picks it up on the next
+import. A package that exposes neither is skipped silently, so an empty
+directory costs nothing.
+
+`Ticketmaster` is deliberately **not** in this folder - it is a shared
+`tools/common/` tool that any original tool may call, and it is not what makes
+your contribution original.
