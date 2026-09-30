@@ -1,17 +1,18 @@
 import json
 import logging
 import os
+import time
 import uuid
 from pathlib import Path
 
 import litellm
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from tools import TOOLS, run_tool
+from tools import TOOLS, TOOL_MAP, run_tool
 
 # Load the local .env before anything reads configuration: LiteLLM needs
 # GOOGLE_CLOUD_PROJECT, and gcloud's authorized_user ADC does not report a
@@ -89,7 +90,7 @@ TRACE_ALLOWED_KEYS = (
 
 
 def safe_trace_result(result: str) -> dict:
-    """Summarize a tool result for the visible trace without leaking notice bodies."""
+    """Summarize a tool result for the collapsed trace header without notice bodies."""
     try:
         parsed = json.loads(result)
     except ValueError:
@@ -97,6 +98,14 @@ def safe_trace_result(result: str) -> dict:
     if isinstance(parsed, dict):
         return {key: parsed[key] for key in TRACE_ALLOWED_KEYS if key in parsed}
     return {"ok": None}
+
+
+def _as_payload(result: str):
+    """Parse a tool result for the browser, keeping the raw string if it is not JSON."""
+    try:
+        return json.loads(result)
+    except ValueError:
+        return result
 
 
 def run_agent(messages: list[dict]) -> tuple[str, list[dict]]:
@@ -126,9 +135,19 @@ def run_agent(messages: list[dict]) -> tuple[str, list[dict]]:
         # The harness, not the model, runs each tool and appends the result
         for call in reply.tool_calls:
             args = json.loads(call.function.arguments)
+            started = time.monotonic()
             result = run_tool(call.function.name, args)
             tool_calls += [
-                {"name": call.function.name, "args": args, "result": safe_trace_result(result)}
+                {
+                    "name": call.function.name,
+                    "args": args,
+                    # `summary` is the collapsed header (safe scalars only);
+                    # `result` is the full payload, shown expanded on demand so
+                    # the grader can see exactly what the model was told.
+                    "summary": safe_trace_result(result),
+                    "elapsed_ms": int((time.monotonic() - started) * 1000),
+                    "result": _as_payload(result),
+                }
             ]
 
             messages += [{"role": "tool", "tool_call_id": call.id, "content": result}]
@@ -190,6 +209,56 @@ def chat(request: ChatRequest):
 def clear(session_id: str | None = None):
     sessions.pop(session_id, None)
     return {"status": "ok"}
+
+
+# --- Local tool test bench ---------------------------------------------------
+# Not part of the deployed agent: an endpoint that runs tools on demand would
+# let any visitor spend the Ticketmaster quota, so it stays behind a flag.
+
+DEBUG_UI_ENABLED = os.environ.get("KPOP_DEBUG_UI", "").strip().lower() in {"1", "true", "yes"}
+
+
+class ToolRunRequest(BaseModel):
+    name: str
+    args: dict = {}
+
+
+def _require_bench() -> None:
+    if not DEBUG_UI_ENABLED:
+        raise HTTPException(status_code=404, detail="Tool bench is disabled: set KPOP_DEBUG_UI=1 to enable.")
+
+
+@app.get("/bench")
+def bench():
+    _require_bench()
+    return FileResponse(Path(__file__).parent / "bench.html")
+
+
+@app.get("/bench/tools")
+def bench_tools():
+    """Hand the schemas to the page so it builds one form per tool automatically."""
+    _require_bench()
+    return {"tools": TOOLS}
+
+
+@app.post("/bench/run")
+def bench_run(request: ToolRunRequest):
+    """Run one tool directly, bypassing the model, and return the full envelope."""
+    _require_bench()
+    started = time.monotonic()
+    result = run_tool(request.name, request.args)
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    try:
+        payload = json.loads(result)
+    except ValueError:
+        payload = result
+    return {
+        "name": request.name,
+        "args": request.args,
+        "elapsed_ms": elapsed_ms,
+        "chars": len(result),
+        "result": payload,
+    }
 
 
 if __name__ == "__main__":

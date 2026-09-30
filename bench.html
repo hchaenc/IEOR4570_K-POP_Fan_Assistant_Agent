@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Tool bench - K-pop fan assistant</title>
+        <style>
+            * { box-sizing: border-box; margin: 0; padding: 0; }
+            body {
+                font-family: system-ui, sans-serif;
+                padding: 2rem 1rem;
+                color: #111;
+                background: #fafafa;
+                line-height: 1.5;
+            }
+            #container { max-width: 1080px; margin: 0 auto; display: flex; flex-direction: column; gap: 1.25rem; }
+            h1 { font-size: 1.25rem; }
+            .hint { font-size: 0.8rem; color: #666; }
+            section { background: #fff; border: 1px solid #e0e0e0; padding: 1.25rem; }
+            #controls { display: flex; flex-direction: column; gap: 0.75rem; }
+            .field { display: flex; flex-direction: column; gap: 0.2rem; max-width: 34rem; }
+            .field label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: #666; }
+            .field input, .field select {
+                padding: 0.5rem 0.6rem; border: 1px solid #d4d4d4; font-size: 0.9rem; font-family: inherit;
+            }
+            .field .desc { font-size: 0.72rem; color: #888; }
+            .row { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+            button {
+                padding: 0.6rem 1.2rem; background: #000; color: #fff; border: none;
+                font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; cursor: pointer;
+            }
+            button:disabled { opacity: 0.3; }
+            button.ghost { background: #eee; color: #111; border: 1px solid #d4d4d4; padding: 0.3rem 0.6rem; }
+            #status { font-family: ui-monospace, monospace; font-size: 0.78rem; color: #444; }
+            .stats { display: flex; gap: 1.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+            .stat b { display: block; font-size: 1.3rem; font-family: ui-monospace, monospace; }
+            .stat span { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; color: #888; }
+            .badge {
+                display: inline-block; font-size: 0.66rem; padding: 0.1rem 0.4rem; border-radius: 2px;
+                text-transform: uppercase; letter-spacing: 0.04em; background: #eee; color: #333;
+            }
+            .badge.ticketed_event { background: #dcfce7; color: #166534; }
+            .badge.popup { background: #fef3c7; color: #92400e; }
+            .badge.fan_event { background: #e0e7ff; color: #3730a3; }
+            .badge.merchandise { background: #f3e8ff; color: #6b21a8; }
+            .badge.online_event { background: #e0f2fe; color: #075985; }
+            .badge.announcement { background: #f1f5f9; color: #475569; }
+            .notice { border-top: 1px solid #eee; padding: 0.7rem 0; display: flex; flex-direction: column; gap: 0.25rem; }
+            .notice:first-of-type { border-top: none; }
+            .notice .title { font-weight: 600; font-size: 0.92rem; }
+            .notice .meta { font-size: 0.74rem; color: #666; font-family: ui-monospace, monospace; }
+            .notice .excerpt { font-size: 0.82rem; color: #333; background: #fafafa; padding: 0.4rem 0.6rem; border-left: 3px solid #d4d4d4; white-space: pre-wrap; }
+            table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+            th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid #eee; vertical-align: top; }
+            th { font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.05em; color: #888; }
+            .error { background: #fef2f2; border-left: 3px solid #dc2626; padding: 0.75rem 1rem; font-size: 0.88rem; }
+            .error code { font-family: ui-monospace, monospace; font-weight: 700; }
+            a { color: #1d4ed8; }
+            pre { font-family: ui-monospace, monospace; font-size: 0.72rem; overflow-x: auto; background: #0b0b0b; color: #d4d4d4; padding: 1rem; max-height: 30rem; }
+            h2 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; color: #666; margin-bottom: 0.75rem; }
+        </style>
+    </head>
+    <body>
+        <div id="container">
+            <div>
+                <h1>Tool bench</h1>
+                <p class="hint">
+                    Runs <code>run_tool()</code> directly, with no model in the loop, so a
+                    result is reproducible and shows the full envelope the chat UI hides.
+                    The chat UI is at <a href="/">/</a>.
+                </p>
+            </div>
+
+            <section id="controls">
+                <div class="field">
+                    <label for="tool">Tool</label>
+                    <select id="tool"></select>
+                </div>
+                <div id="args"></div>
+                <div class="row">
+                    <button id="run">Run tool</button>
+                    <span id="status"></span>
+                </div>
+            </section>
+
+            <section id="summary"><h2>Result</h2><p class="hint">Nothing run yet.</p></section>
+
+            <details id="raw-wrap">
+                <summary class="hint">Raw JSON</summary>
+                <pre id="raw">-</pre>
+            </details>
+        </div>
+
+        <script>
+            const toolSelect = document.getElementById("tool");
+            const argsBox = document.getElementById("args");
+            const runBtn = document.getElementById("run");
+            const status = document.getElementById("status");
+            const summary = document.getElementById("summary");
+            const raw = document.getElementById("raw");
+            let schemas = [];
+            let inputs = {};
+
+            // Notice text and event names are upstream content: always set it
+            // through textContent, never by interpolating into innerHTML.
+            function el(tag, className, text) {
+                const node = document.createElement(tag);
+                if (className) node.className = className;
+                if (text !== undefined && text !== null) node.textContent = String(text);
+                return node;
+            }
+
+            function link(url, label) {
+                const a = el("a", null, label || "link");
+                a.href = url;
+                a.target = "_blank";
+                a.rel = "noopener";
+                return a;
+            }
+
+            function typeOf(schema) {
+                const t = Array.isArray(schema.type) ? schema.type.find((x) => x !== "null") : schema.type;
+                return t || "string";
+            }
+
+            function renderArgs() {
+                argsBox.innerHTML = "";
+                inputs = {};
+                const tool = schemas.find((s) => s.function.name === toolSelect.value);
+                const params = (tool && tool.function.parameters) || { properties: {} };
+                for (const [name, schema] of Object.entries(params.properties || {})) {
+                    const field = el("div", "field");
+                    const label = el("label", null, name + ((params.required || []).includes(name) ? " (required)" : " (optional)"));
+                    const input = document.createElement("input");
+                    input.type = typeOf(schema) === "integer" ? "number" : "text";
+                    label.htmlFor = input.id = "arg-" + name;
+                    field.append(label, input, el("span", "desc", schema.description || ""));
+                    argsBox.append(field);
+                    inputs[name] = input;
+                }
+            }
+
+            function collectArgs() {
+                const args = {};
+                for (const [name, input] of Object.entries(inputs)) {
+                    if (input.value === "") continue; // omit: let server defaults apply
+                    args[name] = input.type === "number" ? Number(input.value) : input.value;
+                }
+                return args;
+            }
+
+            function renderStats(data) {
+                const stats = el("div", "stats");
+                const add = (label, value) => {
+                    const box = el("div", "stat");
+                    box.append(el("b", null, value), el("span", null, label));
+                    stats.append(box);
+                };
+                const r = data.result || {};
+                add("status", r.ok === true ? "ok" : r.ok === false ? "error" : "-");
+                add("latency", data.elapsed_ms + " ms");
+                add("payload", data.chars + " chars");
+                add("~tokens", Math.round(data.chars / 3.5));
+                if (typeof r.scanned_count === "number") add("scanned", r.scanned_count);
+                if (typeof r.notice_count === "number") add("classified", r.notice_count);
+                if (typeof r.notice_matched === "number") add("in window", r.notice_matched);
+                if (typeof r.matched_count === "number") add("TM events", r.matched_count);
+                return stats;
+            }
+
+            function renderPlan(data) {
+                const r = data.result || {};
+                if (!r.ok) {
+                    const box = el("div", "error");
+                    box.append(
+                        el("p", null, "Source: " + (r.source || "?")),
+                        el("p", null, ""),
+                        el("code", null, r.error || "unknown"),
+                        el("p", null, r.message || "")
+                    );
+                    summary.append(box);
+                    return;
+                }
+                summary.append(renderStats(data));
+
+                summary.append(el("h2", null, "Notices (" + (r.notices || []).length + ")"));
+                for (const notice of r.notices || []) {
+                    const card = el("div", "notice");
+                    const head = el("div", "row");
+                    head.append(
+                        el("span", "badge " + notice.event_type, notice.event_type),
+                        el("span", "title", notice.title)
+                    );
+                    const readBtn = el("button", "ghost", "read full text");
+                    readBtn.onclick = () => queueRead(r.artist, notice.notice_id);
+                    head.append(readBtn);
+                    card.append(head);
+                    const evidence =
+                        notice.matched_field === null || notice.matched_field === undefined
+                            ? "no hint matched"
+                            : "matched " + JSON.stringify(notice.matched_signal) + " in the " + notice.matched_field;
+                    card.append(
+                        el(
+                            "div",
+                            "meta",
+                            "#" + notice.notice_id + "  " + (notice.published_at || "").slice(0, 10) +
+                            "  " + evidence + (notice.ticket_relevant ? "  -> Ticketmaster" : "")
+                        )
+                    );
+                    if (notice.excerpt) card.append(el("div", "excerpt", notice.excerpt));
+                    if (notice.url) card.append(link(notice.url, notice.url));
+                    summary.append(card);
+                }
+
+                const events = r.ticketmaster_events || [];
+                summary.append(el("h2", null, "Ticketmaster (" + events.length + ")"));
+                if (!events.length) {
+                    summary.append(el("p", "hint", "No Ticketmaster events matched. searched: " + JSON.stringify(r.ticketmaster_searched)));
+                } else {
+                    const table = el("table");
+                    const head = el("tr");
+                    for (const h of ["date", "event", "venue / city", "on sale", "presales", "limit", "price", "buy"]) head.append(el("th", null, h));
+                    table.append(head);
+                    for (const e of events) {
+                        const row = el("tr");
+                        row.append(
+                            el("td", null, e.date + " " + (e.time || "").slice(0, 5)),
+                            el("td", null, e.name),
+                            el("td", null, (e.venue || "-") + ", " + (e.city || "-") + " (" + (e.country || "-") + ")"),
+                            el("td", null, e.public_on_sale_at || "-"),
+                            el("td", null, (e.presale_windows || []).map((p) => p.name).join(", ") || "-"),
+                            el("td", null, e.ticket_limit ? e.ticket_limit.slice(0, 60) : "-"),
+                            el("td", null, e.price_min == null ? "not published" : e.price_min + "-" + e.price_max + " " + e.currency),
+                            el("td", null)
+                        );
+                        if (e.url) row.lastChild.append(link(e.url, "link"));
+                        table.append(row);
+                    }
+                    summary.append(table);
+                }
+                if (r.ticketmaster_error) {
+                    const box = el("div", "error");
+                    box.append(el("code", null, r.ticketmaster_error.error), el("p", null, r.ticketmaster_error.message + " (notices above are still valid)"));
+                    summary.append(box);
+                }
+            }
+
+            function renderRead(data) {
+                const r = data.result || {};
+                summary.append(renderStats(data));
+                if (!r.ok) {
+                    const box = el("div", "error");
+                    box.append(el("code", null, r.error), el("p", null, r.message || ""));
+                    summary.append(box);
+                    return;
+                }
+                const card = el("div", "notice");
+                card.append(el("div", "row", null));
+                card.firstChild.append(el("span", "badge", "#" + r.notice_id), el("span", "title", r.title));
+                card.append(el("div", "meta", (r.published_at || "").slice(0, 10) + "  " + r.text_chars + " chars total" + (r.truncated ? "  (truncated by max_chars)" : "")));
+                card.append(el("div", "excerpt", r.text));
+                if (r.url) card.append(link(r.url, r.url));
+                summary.append(card);
+            }
+
+            function render(data) {
+                summary.innerHTML = "";
+                summary.append(el("h2", null, data.name + " -> " + JSON.stringify(data.args)));
+                if (data.name === "plan_offline_attendance") renderPlan(data);
+                else if (data.name === "read_weverse_notice") renderRead(data);
+                else {
+                    summary.append(renderStats(data));
+                    const pre = el("pre");
+                    pre.textContent = JSON.stringify(data.result, null, 2);
+                    summary.append(pre);
+                }
+                raw.textContent = JSON.stringify(data.result, null, 2);
+                document.getElementById("raw-wrap").open = false;
+            }
+
+            function queueRead(artist, noticeId) {
+                toolSelect.value = "read_weverse_notice";
+                renderArgs();
+                if (inputs.artist) inputs.artist.value = artist || "";
+                if (inputs.notice_id) inputs.notice_id.value = noticeId || "";
+                runBtn.click();
+            }
+
+            async function run() {
+                runBtn.disabled = true;
+                status.textContent = "running...";
+                const body = { name: toolSelect.value, args: collectArgs() };
+                try {
+                    const res = await fetch("/bench/run", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(body),
+                    });
+                    if (!res.ok) throw new Error("HTTP " + res.status + " " + (await res.text()).slice(0, 160));
+                    const data = await res.json();
+                    render(data);
+                    status.textContent = data.elapsed_ms + " ms / " + data.chars + " chars";
+                } catch (err) {
+                    status.textContent = "failed: " + err.message;
+                } finally {
+                    runBtn.disabled = false;
+                }
+            }
+
+            async function boot() {
+                try {
+                    const res = await fetch("/bench/tools");
+                    if (!res.ok) throw new Error("HTTP " + res.status);
+                    schemas = (await res.json()).tools || [];
+                } catch (err) {
+                    status.textContent = "Could not load tool list: " + err.message;
+                    return;
+                }
+                for (const schema of schemas) {
+                    toolSelect.append(el("option", null, schema.function.name));
+                }
+                toolSelect.onchange = renderArgs;
+                runBtn.onclick = run;
+                renderArgs();
+                // A sensible first click: the artist with the richest live feed.
+                if (inputs.artist) inputs.artist.value = "aespa";
+            }
+
+            boot();
+        </script>
+    </body>
+</html>

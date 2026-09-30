@@ -157,8 +157,12 @@ def test_live_full_chain_single_tool_call(monkeypatch):
     entry = trace[0]
     assert entry["name"] == "plan_offline_attendance"
     assert entry["args"] == {"artist": "yoasobi"}
+    # The collapsed header keeps only the safe summary scalars...
+    assert entry["summary"]["ok"] is True
+    assert entry["summary"]["scanned_count"] > 0
+    assert "notices" not in entry["summary"] and "ticketmaster_events" not in entry["summary"]
+    # ...while the expandable panel carries the payload the model was given.
     assert entry["result"]["ok"] is True
-    assert entry["result"]["scanned_count"] > 0
-    # trace stays summary-safe: no notice/event payloads leak to the UI
-    assert "notices" not in entry["result"] and "ticketmaster_events" not in entry["result"]
-    print("\nfull chain ok: one tool call -> live notices + ticketmaster; envelope summary:", entry["result"])
+    assert entry["result"]["notices"]
+    assert entry["elapsed_ms"] >= 0
+    print("\nfull chain ok: one tool call -> live notices + ticketmaster; summary:", entry["summary"])

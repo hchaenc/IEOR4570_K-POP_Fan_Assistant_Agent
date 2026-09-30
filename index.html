@@ -3,7 +3,7 @@
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>Gemini Web Tool Calling</title>
+        <title>K-pop Event Assistant</title>
         <style>
             * {
                 box-sizing: border-box;
@@ -17,13 +17,46 @@
                 justify-content: center;
                 align-items: center;
                 padding: 3rem 1rem;
+                background: #f4f2f7;
             }
             #container {
                 width: 100%;
                 max-width: 900px;
                 display: flex;
                 flex-direction: column;
-                border: 1px solid #e0e0e0;
+                border: 1px solid #ddd6ea;
+                background: #fff;
+            }
+            #intro {
+                padding: 1.5rem 2rem;
+                border-bottom: 1px solid #eee9f5;
+                background: #201437;
+                color: #fff;
+            }
+            #intro h1 {
+                font-size: 1.05rem;
+                letter-spacing: 0.01em;
+            }
+            #intro p {
+                font-size: 0.8rem;
+                line-height: 1.5;
+                opacity: 0.82;
+                margin-top: 0.4rem;
+                max-width: 46rem;
+            }
+            #intro .sources {
+                font-size: 0.68rem;
+                letter-spacing: 0.05em;
+                text-transform: uppercase;
+                opacity: 0.6;
+                margin-top: 0.6rem;
+            }
+            #examples {
+                display: flex;
+                gap: 0.5rem;
+                flex-wrap: wrap;
+                padding: 1rem 2rem;
+                border-bottom: 1px solid #eee9f5;
             }
             #messages {
                 overflow-y: auto;
@@ -52,39 +85,28 @@
             .msg.loading .content {
                 color: #999;
             }
-            #input-area {
-                display: flex;
-                gap: 1rem;
-                padding: 1.5rem;
-                border-top: 1px solid #e0e0e0;
+            .msg .content h4 {
+                font-size: 0.95rem;
+                margin: 0.8rem 0 0.3rem;
             }
-            #user-input {
-                flex: 1;
-                padding: 0.75rem 0;
-                border: none;
-                border-bottom: 1px solid #e0e0e0;
-                font-size: 1rem;
-                outline: none;
+            .msg .content ul {
+                margin: 0 0 0.7rem 1.2rem;
             }
-            #user-input:focus {
-                border-bottom-color: #000;
+            .msg .content a {
+                color: #6d28d9;
             }
-            button {
-                padding: 0.75rem 1.5rem;
-                background: #000;
-                color: #fff;
-                border: none;
-                font-size: 0.75rem;
-                text-transform: uppercase;
-                letter-spacing: 0.05em;
-                cursor: pointer;
+            .msg .content code {
+                font-family: ui-monospace, monospace;
+                font-size: 0.85em;
+                background: #f3eefc;
+                padding: 0.05rem 0.25rem;
             }
             .tool {
                 font-family: ui-monospace, monospace;
                 font-size: 0.75rem;
                 color: #555;
-                background: #f5f5f5;
-                border-left: 3px solid #f59e0b;
+                background: #f7f5fb;
+                border-left: 3px solid #7c3aed;
                 padding: 0.5rem 0.75rem;
                 margin: 0.25rem 0 0.75rem;
                 white-space: pre-wrap;
@@ -93,7 +115,53 @@
             .tool .label {
                 text-transform: uppercase;
                 letter-spacing: 0.05em;
-                color: #b45309;
+                color: #6d28d9;
+            }
+            .tool .stats {
+                color: #7a7288;
+            }
+            #input-area {
+                display: flex;
+                gap: 1rem;
+                padding: 1.5rem 2rem;
+                border-top: 1px solid #eee9f5;
+            }
+            #user-input {
+                flex: 1;
+                padding: 0.75rem 0;
+                border: none;
+                border-bottom: 1px solid #ddd6ea;
+                font-size: 1rem;
+                outline: none;
+                font-family: inherit;
+            }
+            #user-input:focus {
+                border-bottom-color: #7c3aed;
+            }
+            button {
+                padding: 0.75rem 1.5rem;
+                background: #201437;
+                color: #fff;
+                border: none;
+                font-size: 0.75rem;
+                text-transform: uppercase;
+                letter-spacing: 0.05em;
+                cursor: pointer;
+            }
+            #examples button,
+            #intro button {
+                padding: 0.45rem 0.8rem;
+                background: #f3eefc;
+                color: #4c1d95;
+                text-transform: none;
+                letter-spacing: 0;
+                font-size: 0.78rem;
+            }
+            #intro button {
+                background: rgba(255, 255, 255, 0.16);
+                color: #fff;
+                float: right;
+                margin-left: 1rem;
             }
             button:disabled {
                 opacity: 0.3;
@@ -102,15 +170,32 @@
     </head>
     <body>
         <div id="container">
+            <div id="intro">
+                <button id="reset-btn">New conversation</button>
+                <h1>K-pop Event Assistant</h1>
+                <p>
+                    Ask which concerts, fan meetings or pop-ups an artist is holding and
+                    how to attend one. It reads the artist's official Weverse notices,
+                    sorts them by event type, and looks up ticketed shows on Ticketmaster
+                    for on-sale times, presale windows and ticket limits.
+                </p>
+                <div class="sources">Weverse notices · Ticketmaster Discovery · Gemini tool calling</div>
+            </div>
+            <div id="examples">
+                <button>What aespa US tour dates are on sale, and when do tickets open?</button>
+                <button>What exactly does the aespa presale notice say about who can join?</button>
+                <button>Search YOASOBI notices from the last year for pop-up events.</button>
+                <button>I want to see NCT TEN live - help me plan.</button>
+            </div>
             <div id="messages"></div>
             <div id="input-area">
                 <input
                     type="text"
                     id="user-input"
-                    placeholder="Type a message..."
+                    placeholder="Ask about an artist's events..."
                     autocomplete="off"
                 />
-                <button id="send-btn">Send</button>
+                <button id="send-btn">Ask</button>
             </div>
         </div>
         <script>
@@ -127,7 +212,7 @@
                     (isLoading ? " loading" : "");
                 div.innerHTML =
                     '<div class="role">' +
-                    role +
+                    escapeHtml(role) +
                     '</div><div class="content">' +
                     text +
                     "</div>";
@@ -136,13 +221,65 @@
                 return div;
             }
 
+            // Notice text and event names are upstream content, so markdown is
+            // applied only after escaping: no tool result can inject markup.
+            function escapeHtml(value) {
+                return String(value == null ? "" : value).replace(/[&<>"']/g, (c) =>
+                    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+                );
+            }
+
+            function renderMarkdown(plain) {
+                let html = escapeHtml(plain);
+                html = html.replace(/^#{1,6}\s*(.+)$/gm, "<h4>$1</h4>");
+                html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+                html = html.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+                html = html.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+                html = html.replace(
+                    /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+                    '<a href="$2" target="_blank" rel="noopener">$1</a>'
+                );
+                html = html.replace(/^\s*[-*+]\s+(.+)$/gm, "<li>$1</li>");
+                html = html.replace(/(<li>[\s\S]*?<\/li>)(?!\s*<li>)/g, "<ul>$1</ul>");
+                html = html.replace(/\n{2,}/g, "</p><p>").replace(/\n/g, "<br>");
+                return "<p>" + html + "</p>";
+            }
+
+            function addToolCall(call, before) {
+                const div = document.createElement("div");
+                div.className = "tool";
+                const label = document.createElement("span");
+                label.className = "label";
+                label.textContent = "tool call  ";
+                div.appendChild(label);
+
+                const summary = call.summary || {};
+                const stats = [
+                    summary.ok === true ? "ok" : summary.ok === false ? "error " + summary.error : "",
+                    summary.scanned_count != null ? "scanned " + summary.scanned_count : "",
+                    summary.notice_matched != null ? "in window " + summary.notice_matched : "",
+                    summary.matched_count != null ? "ticketmaster " + summary.matched_count : "",
+                    summary.text_chars != null ? "chars " + summary.text_chars : "",
+                    call.elapsed_ms != null ? call.elapsed_ms + " ms" : "",
+                ].filter(Boolean);
+
+                div.appendChild(
+                    document.createTextNode(
+                        call.name + "(" + JSON.stringify(call.args) + ")\n" +
+                        (stats.length ? "→ " + stats.join("  ·  ") + "\n" : "") +
+                        "→ " + JSON.stringify(call.result, null, 2)
+                    )
+                );
+                messages.insertBefore(div, before);
+            }
+
             async function send() {
                 const text = userInput.value.trim();
                 if (!text) return;
 
                 userInput.value = "";
                 sendBtn.disabled = true;
-                addMessage("you", text);
+                addMessage("you", escapeHtml(text));
                 const loading = addMessage("assistant", "Thinking...", true);
 
                 try {
@@ -157,24 +294,14 @@
                     const data = await res.json();
                     sessionId = data.session_id;
 
-                    // Show each tool the harness ran, above the assistant's answer
+                    // Show every tool the harness ran, above the assistant's answer
                     for (const call of data.tool_calls || []) {
-                        const div = document.createElement("div");
-                        div.className = "tool";
-                        const label = document.createElement("span");
-                        label.className = "label";
-                        label.textContent = "tool call  ";
-                        div.appendChild(label);
-                        div.appendChild(
-                            document.createTextNode(
-                                call.name + "(" + JSON.stringify(call.args) + ")\n→ " + call.result,
-                            ),
-                        );
-                        messages.insertBefore(div, loading);
+                        addToolCall(call, loading);
                     }
-                    loading.querySelector(".content").textContent =
-                        data.response;
                     loading.classList.remove("loading");
+                    loading.querySelector(".content").innerHTML = renderMarkdown(
+                        data.response || ""
+                    );
                 } catch (e) {
                     loading.querySelector(".content").textContent =
                         "Error: " + e.message;
@@ -182,11 +309,29 @@
                 }
                 sendBtn.disabled = false;
                 userInput.focus();
+                messages.scrollTop = messages.scrollHeight;
+            }
+
+            async function reset() {
+                if (sessionId) {
+                    await fetch("/clear?session_id=" + encodeURIComponent(sessionId), {
+                        method: "POST",
+                    });
+                }
+                sessionId = null;
+                messages.innerHTML = "";
+                userInput.focus();
             }
 
             sendBtn.addEventListener("click", send);
             userInput.addEventListener("keydown", function (e) {
                 if (e.key === "Enter") send();
+            });
+            document.getElementById("reset-btn").addEventListener("click", reset);
+            document.getElementById("examples").addEventListener("click", function (e) {
+                if (e.target.tagName !== "BUTTON") return;
+                userInput.value = e.target.textContent;
+                send();
             });
             userInput.focus();
         </script>
