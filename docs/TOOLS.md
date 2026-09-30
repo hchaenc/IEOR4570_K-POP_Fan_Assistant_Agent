@@ -162,12 +162,39 @@ the venue name into coordinates, one Overpass query lists what is mapped
 within `radius_m` (default 500, clamped to 200-1500). Returns `nearby` with up
 to 3 places per category (`convenience_store`, `station`, `toilets`, `cafe`,
 `fast_food`, `pharmacy`), each with `meters`, `walk_min` (80 m/min) and, where
-mapped, `opening_hours` / `open_24h` / `paid`; `tips` built from the gaps (no
-toilet within 300 m, no 24-hour store, a quieter second station for after the
-show); `coordinates`; and a `map_url`.
+mapped, `opening_hours` / `open_24h` / `paid`; `signals`, computed over every
+mapped place rather than the top 3; `coordinates`; and a `map_url`.
+
+```json
+"signals": {
+  "nearest_toilet_m": 120, "nearest_toilet_paid": true,
+  "nearest_food_or_cafe": "Dome Cafe",
+  "convenience_store_count": 2, "store_24h_count": 1,
+  "station_count": 2, "second_station_extra_walk_min": 2,
+  "gaps": []
+}
+```
+
+`gaps` uses fixed codes: `no_public_toilet_within_300m`,
+`no_convenience_store`, `no_store_marked_24h`, `no_station`, `single_station`,
+`no_cafe_or_fast_food`, `no_pharmacy`.
+
+The tool returns facts, not advice. An earlier version returned finished tip
+sentences, and the model repeated them word for word to every user. Whether a
+missing 24-hour store matters depends on whether the fan queues overnight, which
+only the conversation knows, so the system prompt tells the model to work out
+the user's plan (asking once if it is unclear), lead with the two or three
+points that matter for it, and not recite every category.
 
 The `note` field says that an empty category means nothing is mapped there, not
 that nothing exists, so the model does not tell a fan there is no toilet.
+
+Each place also carries `lat` / `lon`. The model does not need them: the chat
+page (`index.html`) finds any successful `venue_survival_kit` result in the
+tool trace and draws a Leaflet map above the answer, with the venue, the search
+radius and one colored dot per place (popups show name and walking minutes).
+Leaflet loads from cdnjs and tiles from openstreetmap.org; if either is
+unreachable the map is skipped and the answer still renders.
 
 ### `search_ticketmaster_events(keyword, city?, country_code?)` - common
 

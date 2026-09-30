@@ -45,7 +45,7 @@ mapping.
 |---|---|---|
 | `weverse/` | offline planning | `weverse_notices` |
 | `merch_appraisal/` | merch price and scam check (eBay via `tools/common/ebay.py`) | `appraise_kpop_merch` |
-| `venue_survival/` | venue surroundings and queueing tips (OpenStreetMap) | `venue_survival_kit` |
+| `venue_survival/` | venue surroundings and queue signals (OpenStreetMap) | `venue_survival_kit` |
 | _yours here_ | stage / MV slice | - |
 | _yours here_ | song / lyrics slice | - |
 

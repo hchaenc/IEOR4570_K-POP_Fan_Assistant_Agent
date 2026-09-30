@@ -4,6 +4,11 @@
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <title>K-pop Event Assistant</title>
+        <link
+            rel="stylesheet"
+            href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"
+        />
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
         <style>
             * {
                 box-sizing: border-box;
@@ -120,6 +125,30 @@
             .tool .stats {
                 color: #7a7288;
             }
+            .venue-map {
+                margin: 0.25rem 0 0.75rem;
+                border: 1px solid #ddd6ea;
+            }
+            .venue-map .map {
+                height: 320px;
+            }
+            .venue-map .legend {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 0.4rem 1rem;
+                padding: 0.5rem 0.75rem;
+                font-size: 0.75rem;
+                color: #555;
+            }
+            .venue-map .legend span::before {
+                content: "";
+                display: inline-block;
+                width: 0.6rem;
+                height: 0.6rem;
+                border-radius: 50%;
+                margin-right: 0.3rem;
+                background: var(--dot);
+            }
             #input-area {
                 display: flex;
                 gap: 1rem;
@@ -186,6 +215,7 @@
                 <button>What exactly does the aespa presale notice say about who can join?</button>
                 <button>Search YOASOBI notices from the last year for pop-up events.</button>
                 <button>I want to see NCT TEN live - help me plan.</button>
+                <button>I'm queueing overnight at KSPO Dome Seoul - what's around?</button>
             </div>
             <div id="messages"></div>
             <div id="input-area">
@@ -273,6 +303,91 @@
                 messages.insertBefore(div, before);
             }
 
+            // venue_survival_kit results: plot the venue, the search radius and
+            // every place the model was shown, so the fan sees the area itself.
+            const PLACE_COLORS = {
+                convenience_store: ["#16a34a", "convenience store"],
+                station: ["#2563eb", "station"],
+                toilets: ["#0891b2", "toilet"],
+                cafe: ["#b45309", "cafe"],
+                fast_food: ["#dc2626", "fast food"],
+                pharmacy: ["#db2777", "pharmacy"],
+            };
+
+            function isVenueResult(result) {
+                return (
+                    result && result.ok === true && result.nearby &&
+                    Array.isArray(result.coordinates) && result.coordinates.length === 2
+                );
+            }
+
+            function popupFor(title, detail) {
+                // Place names are upstream content: set as text, never as HTML.
+                const box = document.createElement("div");
+                const strong = document.createElement("strong");
+                strong.textContent = title;
+                box.appendChild(strong);
+                if (detail) box.appendChild(document.createTextNode(" · " + detail));
+                return box;
+            }
+
+            function addVenueMap(result, before) {
+                if (typeof L === "undefined") return; // CDN unreachable: the answer still works
+                const wrap = document.createElement("div");
+                wrap.className = "venue-map";
+                const mapDiv = document.createElement("div");
+                mapDiv.className = "map";
+                const legend = document.createElement("div");
+                legend.className = "legend";
+                wrap.append(mapDiv, legend);
+                messages.insertBefore(wrap, before);
+
+                const center = result.coordinates;
+                // A view must exist before circles and popups can be laid out.
+                const map = L.map(mapDiv, { scrollWheelZoom: false }).setView(center, 16);
+                L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+                    maxZoom: 19,
+                    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+                }).addTo(map);
+                const radius = L.circle(center, {
+                    radius: result.radius_m || 500,
+                    color: "#7c3aed",
+                    weight: 1,
+                    fillOpacity: 0.05,
+                }).addTo(map);
+                L.marker(center)
+                    .addTo(map)
+                    .bindPopup(popupFor(String(result.venue || "Venue").split(",")[0], "venue"))
+                    .openPopup();
+
+                for (const [category, places] of Object.entries(result.nearby)) {
+                    const [color, label] = PLACE_COLORS[category] || ["#555", category];
+                    const plotted = (places || []).filter((p) => typeof p.lat === "number" && typeof p.lon === "number");
+                    if (!plotted.length) continue;
+                    for (const place of plotted) {
+                        const extra = [place.walk_min + " min walk"];
+                        if (place.open_24h) extra.push("24h");
+                        if (place.paid) extra.push("paid");
+                        L.circleMarker([place.lat, place.lon], {
+                            radius: 7,
+                            color: "#fff",
+                            weight: 2,
+                            fillColor: color,
+                            fillOpacity: 0.95,
+                        })
+                            .addTo(map)
+                            .bindPopup(popupFor(place.name, label + " · " + extra.join(" · ")));
+                    }
+                    const key = document.createElement("span");
+                    key.style.setProperty("--dot", color);
+                    key.textContent = label;
+                    legend.appendChild(key);
+                }
+                if (!legend.children.length) legend.textContent = "Nothing from the tool's categories is mapped in this radius.";
+
+                map.fitBounds(radius.getBounds(), { padding: [10, 10] });
+            }
+
             async function send() {
                 const text = userInput.value.trim();
                 if (!text) return;
@@ -291,12 +406,27 @@
                             session_id: sessionId,
                         }),
                     });
+                    if (!res.ok) {
+                        throw new Error("the server failed (HTTP " + res.status + "). Check the terminal running app.py.");
+                    }
                     const data = await res.json();
                     sessionId = data.session_id;
 
                     // Show every tool the harness ran, above the assistant's answer
                     for (const call of data.tool_calls || []) {
                         addToolCall(call, loading);
+                    }
+                    // One map per venue, after the trace and above the answer.
+                    const mapped = new Set();
+                    for (const call of data.tool_calls || []) {
+                        const result = call.result;
+                        if (!isVenueResult(result) || mapped.has(result.venue)) continue;
+                        mapped.add(result.venue);
+                        try {
+                            addVenueMap(result, loading);
+                        } catch (err) {
+                            console.warn("venue map failed", err); // never block the answer
+                        }
                     }
                     loading.classList.remove("loading");
                     loading.querySelector(".content").innerHTML = renderMarkdown(

@@ -1,9 +1,13 @@
 """Model-facing venue survival tool: what's around a concert venue, for fans queueing outside.
 
 The map data comes from OpenStreetMap through `osm.py`. This tool's own work is
-on top of that: it ranks places by walking time, marks 24-hour shops, picks a
-quieter second subway station for after the show, and turns gaps (no toilet
-nearby, nothing open all night) into queueing tips.
+on top of that: it ranks places by walking time, marks 24-hour shops, measures
+how much further a second station is, and reduces the map to `signals`, the
+facts that matter for a queue (nearest toilet, any 24-hour store, gaps).
+
+It deliberately returns facts, not advice. Whether a missing 24-hour store
+matters depends on whether the fan is queueing overnight, which only the
+conversation knows, so turning signals into advice is the model's job.
 
 OpenStreetMap asks for light use, so results are cached per venue for the life
 of the process.
@@ -69,6 +73,9 @@ def _place(element: dict, lat: float, lon: float) -> dict | None:
         "name": name,
         "meters": meters,
         "walk_min": max(1, round(meters / WALK_M_PER_MIN)),
+        # For the page's map; the model does not need them.
+        "lat": round(float(plat), 6),
+        "lon": round(float(plon), 6),
     }
     hours = tags.get("opening_hours")
     if hours:
@@ -79,39 +86,41 @@ def _place(element: dict, lat: float, lon: float) -> dict | None:
     return place
 
 
-def _tips(nearby: dict[str, list[dict]], radius_m: int) -> list[str]:
-    tips = []
-
+def _signals(nearby: dict[str, list[dict]]) -> dict:
+    """The queue-relevant facts, as values rather than sentences, computed over every mapped place."""
     toilets = nearby["toilets"]
-    cafes = sorted(nearby["cafe"] + nearby["fast_food"], key=lambda p: p["meters"])
-    if not toilets or toilets[0]["meters"] > TOILET_NEAR_M:
-        backup = f" Plan on buying something at {cafes[0]['name']} ({cafes[0]['walk_min']} min walk) to use theirs." if cafes else ""
-        tips.append(f"No public toilet is mapped within {TOILET_NEAR_M} m. Drink less while queueing.{backup}")
-
     stores = nearby["convenience_store"]
-    if not stores:
-        tips.append(f"No convenience store is mapped within {radius_m} m. Bring water and snacks with you.")
-    elif not any(s.get("open_24h") for s in stores):
-        tips.append("None of the nearby convenience stores is marked as open 24 hours. "
-                    "For an overnight queue, bring food and a power bank.")
-
     stations = nearby["station"]
-    if len(stations) >= 2:
-        first, second = stations[0], stations[1]
-        extra = second["walk_min"] - first["walk_min"]
-        further = f"only {extra} more minute(s) on foot" if extra > 0 else "about as close"
-        tips.append(f"After the show {first['name']} will be packed. {second['name']} is {further} "
-                    "and usually much faster to get into.")
-    elif len(stations) == 1:
-        tips.append(f"{stations[0]['name']} is the only station mapped nearby. Expect a long line "
-                    "after the show, or leave during the encore if you need to catch a train.")
-    else:
-        tips.append(f"No station is mapped within {radius_m} m. Plan a taxi or ride-share pickup "
-                    "a few blocks away from the venue.")
+    food = sorted(nearby["cafe"] + nearby["fast_food"], key=lambda p: p["meters"])
 
+    gaps = []
+    if not toilets or toilets[0]["meters"] > TOILET_NEAR_M:
+        gaps.append("no_public_toilet_within_300m")
+    if not stores:
+        gaps.append("no_convenience_store")
+    elif not any(s.get("open_24h") for s in stores):
+        gaps.append("no_store_marked_24h")
+    if not stations:
+        gaps.append("no_station")
+    elif len(stations) == 1:
+        gaps.append("single_station")
+    if not food:
+        gaps.append("no_cafe_or_fast_food")
     if not nearby["pharmacy"]:
-        tips.append("No pharmacy is mapped nearby. Pack painkillers, plasters and hand warmers or a fan.")
-    return tips
+        gaps.append("no_pharmacy")
+
+    return {
+        "nearest_toilet_m": toilets[0]["meters"] if toilets else None,
+        "nearest_toilet_paid": bool(toilets[0].get("paid")) if toilets else None,
+        "nearest_food_or_cafe": food[0]["name"] if food else None,
+        "convenience_store_count": len(stores),
+        "store_24h_count": sum(1 for s in stores if s.get("open_24h")),
+        "station_count": len(stations),
+        "second_station_extra_walk_min": (
+            stations[1]["walk_min"] - stations[0]["walk_min"] if len(stations) >= 2 else None
+        ),
+        "gaps": gaps,
+    }
 
 
 def _failure(code: str, message: str) -> str:
@@ -122,7 +131,7 @@ def _failure(code: str, message: str) -> str:
 
 
 def venue_survival_kit(venue: str, radius_m: int | None = DEFAULT_RADIUS_M) -> str:
-    """Find convenience stores, stations, toilets and food around a concert venue, plus queueing tips."""
+    """Find convenience stores, stations, toilets and food around a concert venue, plus queue signals."""
     venue = venue.strip() if isinstance(venue, str) else ""
     if len(venue) < MIN_VENUE_CHARS:
         return _failure("bad_arguments", "Venue name is too short. Give the venue and city, e.g. 'KSPO Dome Seoul'.")
@@ -171,9 +180,10 @@ def venue_survival_kit(venue: str, radius_m: int | None = DEFAULT_RADIUS_M) -> s
         "coordinates": [spot["lat"], spot["lon"]],
         "radius_m": clamped,
         "note": "From OpenStreetMap. A category with nothing listed means nothing is mapped there, "
-                "not that nothing exists; say so rather than claiming there is none.",
+                "not that nothing exists; say so rather than claiming there is none. These are facts, "
+                "not advice: pick what matters for this user's plan and explain it in your own words.",
         "nearby": {c: places[:PER_CATEGORY] for c, places in nearby.items()},
-        "tips": _tips(nearby, clamped),
+        "signals": _signals(nearby),
         "map_url": f"https://www.openstreetmap.org/?mlat={spot['lat']}&mlon={spot['lon']}#map=17/{spot['lat']}/{spot['lon']}",
     }
     if clamped != radius_m:
@@ -188,12 +198,15 @@ SCHEMA = {
     "function": {
         "name": "venue_survival_kit",
         "description": (
-            "Build a queueing survival guide for a concert venue: the nearest convenience stores "
+            "Map what is around a concert venue from OpenStreetMap: the nearest convenience stores "
             "(marking 24-hour ones), subway/train stations, public toilets, cafes, fast food and pharmacies, "
-            "each with walking minutes, plus practical tips such as a quieter station for after the show. "
-            "Uses OpenStreetMap. Use it when the user is going to a concert, queueing for merch or "
-            "a fan event, or asks what is near a venue. Do not use it to find events or tickets, and "
-            "when Ticketmaster already returned the venue, pass that venue name and city here."
+            "each with walking minutes, plus signals such as the nearest toilet distance, how many "
+            "stores are open 24 hours, how much further the second station is, and gaps in the map. "
+            "It returns facts, not advice: you turn them into advice that fits the user's plan "
+            "(overnight queue, same-day arrival, leaving after the show). Use it when the user is going "
+            "to a concert, queueing for merch or a fan event, or asks what is near a venue. Do not use "
+            "it to find events or tickets, and when Ticketmaster already returned the venue, pass that "
+            "venue name and city here."
         ),
         "parameters": {
             "type": "object",

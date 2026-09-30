@@ -95,10 +95,18 @@ SYSTEM_PROMPT = (
     "as current asking prices in USD, never as sold prices. The rule above "
     "about prices applies to tickets; a merch price must come from this tool. "
     "venue_survival_kit lists convenience stores, stations, toilets, food and "
-    "pharmacies around a venue from OpenStreetMap, with queueing tips: call "
-    "it when the user is going to a show or asks what is near a venue, "
-    "passing the venue name and city. An empty category there means nothing "
-    "is mapped, not that nothing exists.\n"
+    "pharmacies around a venue from OpenStreetMap, with signals such as the "
+    "nearest toilet distance and gaps in the map: call it when the user is "
+    "going to a show or asks what is near a venue, passing the venue name and "
+    "city. It returns facts, not advice, so do the thinking yourself. Work "
+    "out the user's plan from the conversation (queueing overnight, arriving "
+    "on the day, catching a train after the show, the season, who they go "
+    "with); if the plan is unclear and it changes the advice, ask one short "
+    "question. Then lead with the two or three points that matter most for "
+    "that plan, with names and walking minutes, and explain why each "
+    "matters; skip categories that do not. Do not list every category or "
+    "repeat the result field by field. An empty category means nothing is "
+    "mapped there, not that nothing exists, so say it is not on the map.\n"
     "\n"
     "Report tool errors honestly (rate_limited, authentication_failed, "
     "community_not_joined, notice_not_found) with the corrective action the "
@@ -113,6 +121,10 @@ SYSTEM_PROMPT = (
 # Ticketmaster -> read one notice), and a mis-guessed tool name costs one more
 # even though the error message lets the model recover from it.
 MAX_TOOL_ROUNDS = 8
+# Gemini sometimes ends a turn with neither text nor a tool call, usually right
+# after a round of tool results. One re-ask almost always produces the answer.
+MAX_EMPTY_REPLIES = 1
+EMPTY_REPLY_FALLBACK = "Sorry, I could not put an answer together that time. Please ask again."
 
 # --- The Harness ---
 
@@ -156,6 +168,7 @@ def run_agent(messages: list[dict]) -> tuple[str, list[dict]]:
     Returns the final text and a safe record of every tool call made along the way.
     """
     tool_calls = []
+    empty_replies = 0
 
     for _ in range(MAX_TOOL_ROUNDS):
         reply = litellm.completion(
@@ -172,7 +185,17 @@ def run_agent(messages: list[dict]) -> tuple[str, list[dict]]:
         messages += [reply.model_dump()]
 
         if not reply.tool_calls:
-            return reply.content, tool_calls
+            if reply.content:
+                return reply.content, tool_calls
+            # An empty turn must not reach ChatResponse: `response` is a str, so
+            # None fails validation and the page gets a bare 500. Drop the empty
+            # turn (some providers reject an assistant message with no parts)
+            # and ask again.
+            messages.pop()
+            empty_replies += 1
+            if empty_replies > MAX_EMPTY_REPLIES:
+                return EMPTY_REPLY_FALLBACK, tool_calls
+            continue
 
         # The harness, not the model, runs each tool and appends the result
         for call in reply.tool_calls:

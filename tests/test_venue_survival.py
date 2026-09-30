@@ -1,4 +1,4 @@
-"""Tests for the venue survival original tool: ranking, tips and envelopes.
+"""Tests for the venue survival original tool: ranking, signals and envelopes.
 
 OpenStreetMap is faked at the `osm` module seam, so these exercise the real
 tool logic without network.
@@ -90,7 +90,11 @@ def test_kit_groups_places_by_category_nearest_first(monkeypatch):
     assert [(p["name"], p["meters"], p["walk_min"]) for p in nearby["convenience_store"]] == [("GS25", 80, 1), ("CU", 160, 2)]
     assert nearby["convenience_store"][0]["open_24h"] is True and nearby["convenience_store"][1]["open_24h"] is False
     assert [p["name"] for p in nearby["cafe"]] == ["Dome Cafe", "Starbucks"], "ways use their center; brand is a fallback name"
-    assert nearby["toilets"][0] == {"category": "toilets", "name": "unnamed toilets", "meters": 120, "walk_min": 2, "paid": True}
+    toilet = nearby["toilets"][0]
+    assert {k: toilet[k] for k in ("category", "name", "meters", "walk_min", "paid")} == {
+        "category": "toilets", "name": "unnamed toilets", "meters": 120, "walk_min": 2, "paid": True,
+    }
+    assert toilet["lon"] == VENUE["lon"] and abs(toilet["lat"] - VENUE["lat"]) < 0.002, "the page map plots each place"
     assert result["map_url"].startswith("https://www.openstreetmap.org/?mlat=37.5194")
 
 
@@ -106,24 +110,50 @@ def test_at_most_three_places_per_category(monkeypatch):
     assert [c["name"] for c in cafes] == ["Cafe 1", "Cafe 2", "Cafe 3"]
 
 
-def test_well_mapped_venue_only_gets_the_second_station_tip(monkeypatch):
+def test_well_mapped_venue_has_no_gaps_and_measures_the_second_station(monkeypatch):
     use_osm(monkeypatch, well_mapped())
-    tips = kit(venue="KSPO Dome Seoul")["tips"]
-    assert len(tips) == 1
-    assert "Olympic Park will be packed" in tips[0] and "Mongchontoseong is only 2 more minute(s)" in tips[0]
+    assert kit(venue="KSPO Dome Seoul")["signals"] == {
+        "nearest_toilet_m": 120,
+        "nearest_toilet_paid": True,
+        "nearest_food_or_cafe": "Dome Cafe",
+        "convenience_store_count": 2,
+        "store_24h_count": 1,
+        "station_count": 2,
+        "second_station_extra_walk_min": 2,
+        "gaps": [],
+    }
 
 
-def test_gaps_in_the_map_become_queueing_tips(monkeypatch):
+def test_gaps_in_the_map_become_signal_codes(monkeypatch):
     use_osm(monkeypatch, [
         node({"amenity": "fast_food", "name": "Lotteria"}, 100),
         node({"shop": "convenience", "name": "CU"}, 160),
+        node({"amenity": "toilets"}, 350),
+        node({"station": "subway", "name": "Olympic Park"}, 240),
     ])
-    tips = " | ".join(kit(venue="KSPO Dome Seoul")["tips"])
+    signals = kit(venue="KSPO Dome Seoul")["signals"]
 
-    assert "No public toilet is mapped within 300 m" in tips and "Lotteria (1 min walk)" in tips
-    assert "None of the nearby convenience stores is marked as open 24 hours" in tips
-    assert "No station is mapped within 500 m" in tips
-    assert "No pharmacy is mapped nearby" in tips
+    assert signals["gaps"] == ["no_public_toilet_within_300m", "no_store_marked_24h", "single_station", "no_pharmacy"]
+    assert signals["nearest_toilet_m"] == 350 and signals["nearest_toilet_paid"] is False
+    assert signals["nearest_food_or_cafe"] == "Lotteria"
+    assert signals["second_station_extra_walk_min"] is None
+
+
+def test_result_carries_facts_not_prewritten_advice(monkeypatch):
+    """Finished tip sentences got parroted to every user; advice is the model's job."""
+    use_osm(monkeypatch, well_mapped())
+    result = kit(venue="KSPO Dome Seoul")
+    assert "tips" not in result
+    assert "own words" in result["note"]
+
+
+def test_signals_count_every_mapped_place_not_just_the_listed_three(monkeypatch):
+    stores = [node({"shop": "convenience", "name": f"Store {i}"}, 50 * i) for i in range(1, 5)]
+    stores.append(node({"shop": "convenience", "name": "Far 24h", "opening_hours": "24/7"}, 450))
+    use_osm(monkeypatch, stores)
+    result = kit(venue="KSPO Dome Seoul")
+    assert len(result["nearby"]["convenience_store"]) == 3
+    assert result["signals"]["convenience_store_count"] == 5 and result["signals"]["store_24h_count"] == 1
 
 
 def test_nothing_mapped_is_still_a_successful_answer(monkeypatch):
@@ -131,6 +161,9 @@ def test_nothing_mapped_is_still_a_successful_answer(monkeypatch):
     result = kit(venue="KSPO Dome Seoul")
     assert result["ok"] is True
     assert all(places == [] for places in result["nearby"].values())
+    assert result["signals"]["gaps"] == [
+        "no_public_toilet_within_300m", "no_convenience_store", "no_station", "no_cafe_or_fast_food", "no_pharmacy",
+    ]
     assert "not that nothing exists" in result["note"]
 
 
