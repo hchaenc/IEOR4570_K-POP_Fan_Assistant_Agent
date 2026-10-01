@@ -202,12 +202,30 @@ def test_unknown_venue_tells_the_model_how_to_retry(monkeypatch):
     assert calls["query"] == []
 
 
+def test_busy_overpass_still_returns_the_venue_location(monkeypatch):
+    """Real case: Allegiant Stadium timed out after 36 s and the user got nothing,
+    although Nominatim had already found the stadium."""
+    use_osm(monkeypatch, query_error=osm_module.OsmError("timeout", "slow"))
+    result = kit(venue="Allegiant Stadium Las Vegas")
+
+    assert result["ok"] is True and result["nearby_unavailable"] is True
+    assert result["nearby_error"] == "timeout"
+    assert result["coordinates"] == [VENUE["lat"], VENUE["lon"]] and result["map_url"]
+    assert "nearby" not in result and "signals" not in result, "empty lists would read as 'nothing nearby'"
+    assert "Do not say there is nothing nearby" in result["note"]
+
+
 def test_failures_are_not_cached(monkeypatch):
     use_osm(monkeypatch, query_error=osm_module.OsmError("rate_limited", "busy"))
-    assert kit(venue="KSPO Dome Seoul") == {"ok": False, "error": "rate_limited", "message": "busy", "source": "openstreetmap"}
+    assert kit(venue="KSPO Dome Seoul")["nearby_unavailable"] is True
 
     use_osm(monkeypatch, well_mapped())
-    assert kit(venue="KSPO Dome Seoul")["ok"] is True
+    assert "nearby_unavailable" not in kit(venue="KSPO Dome Seoul")
+
+
+def test_a_failed_venue_search_is_still_an_error(monkeypatch):
+    use_osm(monkeypatch, find_error=osm_module.OsmError("timeout", "slow"))
+    assert kit(venue="KSPO Dome Seoul") == {"ok": False, "error": "timeout", "message": "slow", "source": "openstreetmap"}
 
 
 # --- osm client --------------------------------------------------------------------

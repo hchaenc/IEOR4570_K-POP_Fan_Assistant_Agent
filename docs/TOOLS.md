@@ -329,8 +329,13 @@ host. The token (about 2 hours) and responses are cached in the shared client.
 
 Nominatim and Overpass are free and need no key. Both ask for a descriptive
 User-Agent and light use, so results are cached per venue and radius for the
-life of the process. Overpass is often busy: a second mirror is tried before
-the tool gives up. Coverage depends on volunteers, which is why the result
+life of the process. Overpass is often busy: each server gets 15 s, then
+`maps.mail.ru` is tried (`overpass.kumi.systems` and `overpass.private.coffee`
+did not answer within 30 s when measured). If every server fails after the
+venue itself was found, the tool still returns `ok: true` with the venue's
+coordinates and map link plus `nearby_unavailable: true` and no `nearby` /
+`signals`, so the model cannot read empty lists as "nothing nearby"; the page
+still draws the venue on its map. That result is not cached. Coverage depends on volunteers, which is why the result
 carries the "not mapped is not the same as not there" note.
 
 ### Event classification (`tools/common/classify.py`)

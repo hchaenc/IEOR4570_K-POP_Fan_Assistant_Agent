@@ -11,14 +11,18 @@ from __future__ import annotations
 import requests
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+# Tried in order. The public servers are often overloaded for a minute or two,
+# so a slow one is abandoned quickly in favour of the next. Measured October
+# 2026 for one stadium query: overpass-api.de 2 s, maps.mail.ru 11 s;
+# overpass.kumi.systems and overpass.private.coffee did not answer in 30 s.
 OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",  # mirror, tried when the first is busy
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ]
 HEADERS = {"User-Agent": "kpop-fan-assistant-agent/1.0 (IEOR4570 class project)"}
 NOMINATIM_TIMEOUT_SECONDS = 10
-OVERPASS_QUERY_TIMEOUT_SECONDS = 20
-OVERPASS_TIMEOUT_SECONDS = 25
+OVERPASS_QUERY_TIMEOUT_SECONDS = 12
+OVERPASS_TIMEOUT_SECONDS = 15
 
 
 class OsmError(Exception):

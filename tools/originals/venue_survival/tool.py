@@ -123,6 +123,10 @@ def _signals(nearby: dict[str, list[dict]]) -> dict:
     }
 
 
+def _map_url(spot: dict) -> str:
+    return f"https://www.openstreetmap.org/?mlat={spot['lat']}&mlon={spot['lon']}#map=17/{spot['lat']}/{spot['lon']}"
+
+
 def _failure(code: str, message: str) -> str:
     return json.dumps({"ok": False, "error": code, "message": message, "source": SOURCE}, ensure_ascii=False)
 
@@ -153,10 +157,33 @@ def venue_survival_kit(venue: str, radius_m: int | None = DEFAULT_RADIUS_M) -> s
                 f"Could not find a place called '{venue}' on OpenStreetMap. Retry with the city added "
                 "or the English name, e.g. 'KSPO Dome Seoul' or 'Prudential Center Newark'.",
             )
-        filters = [f for tag_filters in CATEGORIES.values() for f in tag_filters]
-        elements = osm.query_around(spot["lat"], spot["lon"], clamped, filters)
     except osm.OsmError as exc:
         return _failure(exc.code, exc.message)
+
+    filters = [f for tag_filters in CATEGORIES.values() for f in tag_filters]
+    try:
+        elements = osm.query_around(spot["lat"], spot["lon"], clamped, filters)
+    except osm.OsmError as exc:
+        # The venue itself was found, so the user still gets its location and
+        # map; only the surroundings are missing. Not cached, so the next ask
+        # tries the servers again.
+        return json.dumps(
+            {
+                "ok": True,
+                "venue": spot["name"],
+                "source": SOURCE,
+                "coordinates": [spot["lat"], spot["lon"]],
+                "radius_m": clamped,
+                "nearby_unavailable": True,
+                "nearby_error": exc.code,
+                "note": "The venue was found, but the OpenStreetMap service that lists nearby places is "
+                        "busy right now. Give the user the venue's location and map link, say the nearby "
+                        "places could not be loaded and to ask again in a minute or two. Do not say there "
+                        "is nothing nearby, and do not guess places.",
+                "map_url": _map_url(spot),
+            },
+            ensure_ascii=False,
+        )
 
     nearby: dict[str, list[dict]] = {c: [] for c in CATEGORIES}
     seen = set()
@@ -184,7 +211,7 @@ def venue_survival_kit(venue: str, radius_m: int | None = DEFAULT_RADIUS_M) -> s
                 "not advice: pick what matters for this user's plan and explain it in your own words.",
         "nearby": {c: places[:PER_CATEGORY] for c, places in nearby.items()},
         "signals": _signals(nearby),
-        "map_url": f"https://www.openstreetmap.org/?mlat={spot['lat']}&mlon={spot['lon']}#map=17/{spot['lat']}/{spot['lon']}",
+        "map_url": _map_url(spot),
     }
     if clamped != radius_m:
         result["radius_note"] = f"radius_m {radius_m} was adjusted to {clamped} (allowed {MIN_RADIUS_M} to {MAX_RADIUS_M})."

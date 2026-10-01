@@ -140,8 +140,9 @@ def test_risky_listings_are_flagged_with_a_reason(monkeypatch):
     flagged = {item["total_usd"]: " ".join(item["why"]) for item in appraise(query="IVE Wonyoung photocard")["flagged_listings"]}
 
     assert "far below the typical price" in flagged[5.0]
-    assert "only 91% positive feedback (3 ratings)" in flagged[6.0]
+    assert "new seller: only 3 ratings" in flagged[6.0]
     assert "signed item" in flagged[130.0]
+    assert "only 96% positive feedback (12 ratings)" in flagged[130.0]
 
 
 def test_a_perfect_but_brand_new_seller_is_called_new_not_badly_rated(monkeypatch):
@@ -150,6 +151,15 @@ def test_a_perfect_but_brand_new_seller_is_called_new_not_badly_rated(monkeypatc
     use_listings(monkeypatch, listings)
     flagged = {item["total_usd"]: item["why"] for item in appraise(query="IVE Wonyoung photocard")["flagged_listings"]}
     assert flagged[19.0] == ["new seller: only 4 ratings"]
+
+
+def test_zero_percent_from_a_seller_without_ratings_reads_as_new(monkeypatch):
+    """eBay reports 0% positive for sellers with (almost) no ratings."""
+    listings = sample_listings()
+    listings.append(listing("IVE Wonyoung photocard official", 19.0, 0.0, 0.0, 0))
+    use_listings(monkeypatch, listings)
+    flagged = {item["total_usd"]: item["why"] for item in appraise(query="IVE Wonyoung photocard")["flagged_listings"]}
+    assert flagged[19.0] == ["new seller: only 0 ratings"]
 
 
 def test_target_price_gets_a_verdict(monkeypatch):

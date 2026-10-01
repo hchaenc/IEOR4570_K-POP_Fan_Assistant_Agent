@@ -189,10 +189,12 @@ def appraise_kpop_merch(query: str, target_price: float | None = None) -> str:
         if SIGNED_PATTERN.search(title):
             warnings.append("signed item: autographs are the most faked K-pop merch, ask for proof")
         fp, fc = item["seller_feedback_pct"], item["seller_feedback_count"]
-        if fp is not None and fp < 97:
-            warnings.append(f"seller has only {fp:g}% positive feedback ({fc} ratings)")
-        elif fc is not None and fc < 10:
+        # eBay reports 0% for sellers with almost no ratings, so the count is
+        # checked first: "0% positive over 0 ratings" means new, not bad.
+        if fc is not None and fc < 10:
             warnings.append(f"new seller: only {fc} rating{'' if fc == 1 else 's'}")
+        elif fp is not None and fp < 97:
+            warnings.append(f"seller has only {fp:g}% positive feedback ({fc} ratings)")
         kept.append({
             **item,
             "category": category,
