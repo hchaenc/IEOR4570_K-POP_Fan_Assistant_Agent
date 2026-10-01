@@ -16,6 +16,8 @@
    project, so run `gemini-hello-world` first to check it.
 3. `uv run app.py`, then open http://localhost:8000
 
-Try: "Is it nice enough to go for a walk in New York?"
+Try: 
+"Is it nice enough to go for a walk in New York?"
+"I like aespa's Licorice. Show me the comeback content."
 
 The weather comes from Open-Meteo, which needs no API key.

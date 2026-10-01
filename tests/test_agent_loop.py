@@ -76,3 +76,72 @@ def test_chat_endpoint_never_returns_500_for_an_empty_reply(monkeypatch):
     res = TestClient(app.app).post("/chat", json={"message": "I want to sofi stadium to see BTS"})
     assert res.status_code == 200
     assert res.json()["response"] == app.EMPTY_REPLY_FALLBACK
+
+
+def test_song_release_result_can_feed_the_comeback_trail(monkeypatch):
+    calls = []
+
+    def run_tool(name, args):
+        calls.append((name, args))
+        if name == "resolve_song_release":
+            return json.dumps(
+                {
+                    "ok": True,
+                    "artist": "aespa",
+                    "song": "Licorice",
+                    "release_title": "Armageddon",
+                }
+            )
+        assert name == "trace_kpop_comeback_era"
+        return json.dumps({"ok": True, "matched_count": 4})
+
+    monkeypatch.setattr(app, "run_tool", run_tool)
+    seen = scripted_model(
+        monkeypatch,
+        _Message(
+            tool_calls=[
+                _ToolCall(
+                    "resolve_1",
+                    "resolve_song_release",
+                    {"artist": "aespa", "song": "Licorice"},
+                )
+            ]
+        ),
+        _Message(
+            tool_calls=[
+                _ToolCall(
+                    "trace_1",
+                    "trace_kpop_comeback_era",
+                    {
+                        "artist": "aespa",
+                        "release_title": "Armageddon",
+                        "anchor_song": "Licorice",
+                    },
+                )
+            ]
+        ),
+        _Message(content="Here is the comeback trail."),
+    )
+
+    response, trace = app.run_agent(
+        [
+            {"role": "system", "content": app.SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": "Show me aespa's Licorice comeback era.",
+            },
+        ]
+    )
+
+    assert response == "Here is the comeback trail."
+    assert [entry[0] for entry in calls] == [
+        "resolve_song_release",
+        "trace_kpop_comeback_era",
+    ]
+    assert calls[1][1] == {
+        "artist": "aespa",
+        "release_title": "Armageddon",
+        "anchor_song": "Licorice",
+    }
+    assert json.loads(seen[1][-1]["content"])["release_title"] == "Armageddon"
+    assert all(entry["result"]["ok"] is True for entry in trace)

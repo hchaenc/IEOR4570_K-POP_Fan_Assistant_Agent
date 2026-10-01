@@ -16,11 +16,14 @@ index.html  <-->  app.py (FastAPI /chat, LiteLLM harness, run_agent loop)
               ├── originals/      one package per team member's primary tool
               │   ├── weverse/          weverse_notices (digest + full text)
               │   ├── merch_appraisal/  appraise_kpop_merch (eBay price + scam check)
-              │   └── venue_survival/   venue_survival_kit (OpenStreetMap)
+              │   ├── venue_survival/   venue_survival_kit (OpenStreetMap)
+              │   └── comeback_trail/   trace_kpop_comeback_era
               └── common/         shared services and tools
                   ├── ticketmaster.py  search_ticketmaster_events
                   ├── ebay.py          eBay Browse client (not a tool)
                   └── classify.py      notice event-type helper (not a tool)
+                  ├── youtube.py       YouTube Data API client (not a tool)
+                  └── itunes.py        resolve_song_release
 ```
 
 A module or package is model-callable exactly when it exposes `SCHEMAS` (list
@@ -196,12 +199,48 @@ radius and one colored dot per place (popups show name and walking minutes).
 Leaflet loads from cdnjs and tiles from openstreetmap.org; if either is
 unreachable the map is skipped and the answer still renders.
 
+### `trace_kpop_comeback_era(artist, release_title, anchor_song?)` - original
+
+Reconstructs the content lifecycle of one K-pop comeback rather than doing a
+generic YouTube search.
+
+The tool retrieves several release-oriented searches, filters noise and
+unrecognized uploaders, then classifies surviving videos into five phases:
+
+1. `pre_release` - MV teasers, highlight medleys, concept films and trailers
+2. `release` - official MVs, performance videos and song-specific content
+3. `promotion` - Music Bank, Inkigayo, Music Core, M Countdown and related stages
+4. `choreography` - dance practices and choreography content
+5. `era_behind` - recording, jacket-shoot, MV and performance behind-the-scenes
+
+The K-pop-specific part is the lifecycle reconstruction itself. The tool does
+not hardcode one artist: the same rules have been verified with aespa's
+`Drama` / `Armageddon` eras and LE SSERAFIM's `EASY` era.
+
+`anchor_song` lets a user enter the era through a B-side or follow-up track.
+For example, `Licorice` can be highlighted inside aespa's wider `Armageddon`
+era, while `Smart` can be highlighted inside LE SSERAFIM's `EASY` era.
+
+When the user names only a song, the model first calls the common
+`resolve_song_release` tool to find its parent album/EP, then calls
+`trace_kpop_comeback_era` with that release and the song as `anchor_song`.
+
 ### `search_ticketmaster_events(keyword, city?, country_code?)` - common
 
 Discovery API v2, one request per call. Returns `matched_count` and `events[]`
 with name, date, time, timezone, status, venue, city, country, `attractions`
 (the headliners), `public_on_sale_at`, `presale_windows`, `ticket_limit`,
 `please_note` and the purchase `url`.
+
+### `resolve_song_release(artist, song, country?)` - common
+
+Uses the public iTunes Search API to resolve a song to its parent album, EP or
+single. No API key is required.
+
+When several exact song matches exist, original album/EP releases are preferred
+over derivative releases such as remixes, sped-up, slowed or instrumental
+versions. This prevents a track such as LE SSERAFIM's `Smart` from resolving to
+`Smart (Remixes)` instead of the original `EASY` EP.
 
 ## 4. Data-source operations
 
@@ -294,6 +333,40 @@ the body, 35 announcements, 10 ticketed. Before tiering, 18 were labeled
 ticketed (11 wasted Ticketmaster searches). Re-check the mix against a live
 artist before trusting any hint-list change.
 
+### YouTube (`tools/common/youtube.py`)
+
+Uses YouTube Data API v3 with `YOUTUBE_API_KEY`. The shared client searches
+public videos, fetches video metadata and statistics, caches responses in
+process, and maps quota, authentication and upstream failures to stable tool
+errors.
+
+The common client deliberately does not decide what counts as K-pop comeback
+content. It only returns video metadata. The original `comeback_trail` tool
+owns the domain logic: uploader filtering, noise removal, lifecycle
+classification and comeback-era reconstruction.
+
+One broad search was not sufficient for comeback reconstruction because
+YouTube relevance ranking often omitted teasers, music-show stages or
+behind-the-scenes videos. The original tool therefore performs several
+release-oriented searches such as the release name, teaser, music show, dance
+practice and behind-the-scenes, then deduplicates the combined results.
+
+
+### iTunes Search (`tools/common/itunes.py`)
+
+Uses Apple's public iTunes Search API and requires no API key. It searches song
+metadata and resolves an exact artist + song match to its parent album, EP or
+single.
+
+The resolver removes packaging suffixes such as `- EP`, `- Single` and
+`- The 1st Album` to produce the `release_title` consumed by
+`trace_kpop_comeback_era`.
+
+The same song can appear in several collections. Original album/EP releases
+are preferred over derivative releases whose collection names contain signals
+such as remix, remixes, sped up, slowed or instrumental. For example,
+LE SSERAFIM's `Smart` resolves to `EASY - EP` rather than `Smart (Remixes)`.
+
 ## 5. Chatbot integration
 
 `app.py` passes `TOOLS` to the model and executes requests through `run_tool`.
@@ -304,6 +377,18 @@ in full rather than guess when detail exceeds the excerpt, state a price only
 when one appears in text it actually read, and attribute every fact to its
 source URL.
 
+For comeback discovery, the model can compose the shared metadata resolver
+with the original comeback tool.
+When the user gives only an artist and song, the intended sequence is:
+`resolve_song_release(artist, song)`
+→ obtain the parent `release_title`
+→ `trace_kpop_comeback_era(artist, release_title, anchor_song=song)`
+When the user already names the release, the model skips iTunes and calls
+`trace_kpop_comeback_era` directly.
+This separation is intentional. iTunes answers the factual metadata question
+"which release contains this song?", while the original tool performs the
+K-pop-specific reasoning over the YouTube comeback-content ecosystem.
+
 - Demo questions (all verified against the live sources):
   - "What aespa US tour dates are on sale, and when do tickets open?"
   - "What exactly does the aespa presale notice say about who can join?"
@@ -312,6 +397,9 @@ source URL.
   - "I want to see NCT TEN live - help me plan."
   - "Someone is selling an IVE Wonyoung LOVE DIVE photocard for $30 - is that fair?"
   - "I'm queueing overnight at UBS Arena New York - what's around?"
+  - "I like aespa's Licorice. Show me the comeback content."
+  - "I like LE SSERAFIM's Smart. Show me the comeback content."
+  - "Show me the comeback trail for aespa's Drama era."
 - Running locally: `uv sync --group dev` then `uv run app.py`
   (`--port` / `--host` to move off 8000). The app boots with no `.env` at all;
   the tools then return `missing_credentials` naming what to add.
@@ -323,8 +411,9 @@ source URL.
   the account that logged in.
 - Deploy note (Cloud Run): inject `WEVERSE_ACCESS_TOKEN`,
   `WEVERSE_REFRESH_TOKEN`, `TICKETMASTER_API_KEY`, `EBAY_CLIENT_ID`,
-  `EBAY_CLIENT_SECRET` and `GOOGLE_CLOUD_PROJECT`
+  `EBAY_CLIENT_SECRET`, `YOUTUBE_API_KEY` and `GOOGLE_CLOUD_PROJECT`
   via `--set-env-vars` or Secret Manager; never bake secrets into the image.
+  The iTunes Search API requires no credential.
   The refresh-token persistence writes only to the local `.env` and degrades
   gracefully on a read-only filesystem.
 - `/bench` is a local tool test page that runs `run_tool` directly with no
@@ -346,3 +435,7 @@ the gateway and service, `tests/test_ticketmaster.py` the common tool, and
 `tests/test_live_e2e.py` the live paths - including a stubbed-LLM test that
 drives `run_agent` through digest -> ticketmaster -> full-text read against
 both real APIs, which is what proves the model really can compose the tools.
+`tests/test_itunes.py` covers exact song matching, release-title cleanup and
+preference for original album/EP releases over remix derivatives.
+`tests/test_comeback_trail.py` covers K-pop lifecycle classification, noise and
+uploader filtering, anchor-song behavior and cross-artist generalization.

@@ -70,7 +70,14 @@ def use_notices(monkeypatch, notices, resolver=None):
 
 def test_registry_exposes_each_original_tool_and_the_common_tool():
     names = sorted(TOOL_MAP)
-    assert names == ["appraise_kpop_merch", "search_ticketmaster_events", "venue_survival_kit", "weverse_notices"]
+    assert names == [
+        "appraise_kpop_merch",
+        "resolve_song_release",
+        "search_ticketmaster_events",
+        "trace_kpop_comeback_era",
+        "venue_survival_kit",
+        "weverse_notices",
+    ]
     # Neither the old composite nor the two-function split survives the merge.
     for retired in ("plan_offline_attendance", "search_weverse_notices", "read_weverse_notice"):
         assert retired not in TOOL_MAP
