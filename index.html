@@ -149,6 +149,68 @@
                 margin-right: 0.3rem;
                 background: var(--dot);
             }
+            .merch {
+                margin: 0.25rem 0 0.75rem;
+                font-size: 0.8rem;
+            }
+            .merch .head {
+                color: #555;
+                margin-bottom: 0.4rem;
+            }
+            .merch .group {
+                font-size: 0.7rem;
+                text-transform: uppercase;
+                letter-spacing: 0.05em;
+                color: #6d28d9;
+                margin: 0.6rem 0 0.3rem;
+            }
+            .merch .group.risky {
+                color: #b91c1c;
+            }
+            .merch .cards {
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+                gap: 0.6rem;
+            }
+            .merch .card {
+                display: flex;
+                flex-direction: column;
+                border: 1px solid #ddd6ea;
+                background: #fff;
+                color: inherit;
+                text-decoration: none;
+            }
+            .merch .card.risky {
+                border-color: #fca5a5;
+                background: #fef2f2;
+            }
+            .merch .card img,
+            .merch .card .noimg {
+                width: 100%;
+                aspect-ratio: 1;
+                object-fit: contain;
+                background: #f7f5fb;
+            }
+            .merch .card .body {
+                padding: 0.4rem 0.5rem 0.5rem;
+                display: flex;
+                flex-direction: column;
+                gap: 0.2rem;
+            }
+            .merch .card .price {
+                font-weight: 600;
+            }
+            .merch .card .title {
+                display: -webkit-box;
+                -webkit-line-clamp: 2;
+                -webkit-box-orient: vertical;
+                overflow: hidden;
+                color: #444;
+            }
+            .merch .card .why {
+                color: #b91c1c;
+                font-size: 0.72rem;
+            }
             #input-area {
                 display: flex;
                 gap: 1rem;
@@ -216,6 +278,7 @@
                 <button>Search YOASOBI notices from the last year for pop-up events.</button>
                 <button>I want to see NCT TEN live - help me plan.</button>
                 <button>I'm queueing overnight at KSPO Dome Seoul - what's around?</button>
+                <button>Is $60 a fair price for a SEVENTEEN lightstick ver 3?</button>
             </div>
             <div id="messages"></div>
             <div id="input-area">
@@ -388,6 +451,86 @@
                 map.fitBounds(radius.getBounds(), { padding: [10, 10] });
             }
 
+            // appraise_kpop_merch results: show the listings' own photos so the
+            // fan can compare the real items. Built from the tool result, never
+            // from model text, and only eBay image and item URLs are used.
+            function isMerchResult(result) {
+                return (
+                    result && result.ok === true &&
+                    Array.isArray(result.best_listings) && Array.isArray(result.flagged_listings)
+                );
+            }
+
+            function merchCard(item, risky) {
+                const url = String(item.url || "");
+                const card = document.createElement(url.startsWith("https://www.ebay.com/") ? "a" : "div");
+                card.className = "card" + (risky ? " risky" : "");
+                if (card.tagName === "A") {
+                    card.href = url;
+                    card.target = "_blank";
+                    card.rel = "noopener noreferrer";
+                }
+                const image = String(item.image_url || "");
+                if (image.startsWith("https://i.ebayimg.com/")) {
+                    const img = document.createElement("img");
+                    img.src = image;
+                    img.alt = "";
+                    img.loading = "lazy";
+                    img.referrerPolicy = "no-referrer";
+                    card.appendChild(img);
+                } else {
+                    const blank = document.createElement("div");
+                    blank.className = "noimg";
+                    card.appendChild(blank);
+                }
+                const body = document.createElement("div");
+                body.className = "body";
+                const price = document.createElement("span");
+                price.className = "price";
+                price.textContent = "$" + Number(item.total_usd).toFixed(2) + " incl. shipping";
+                const title = document.createElement("span");
+                title.className = "title";
+                title.textContent = item.title || "";
+                body.append(price, title);
+                if (risky && Array.isArray(item.why)) {
+                    const why = document.createElement("span");
+                    why.className = "why";
+                    why.textContent = item.why.join("; ");
+                    body.appendChild(why);
+                }
+                card.appendChild(body);
+                return card;
+            }
+
+            function addMerchCards(result, before) {
+                const wrap = document.createElement("div");
+                wrap.className = "merch";
+                const head = document.createElement("div");
+                head.className = "head";
+                const range = result.typical_range_usd || [];
+                head.textContent =
+                    "eBay US asking prices for " + JSON.stringify(result.query) + ": " +
+                    (result.typical_price_usd != null
+                        ? "typical $" + result.typical_price_usd.toFixed(2)
+                        : "editions vary, no single typical price") +
+                    (range.length === 2 ? " (middle half $" + range[0].toFixed(0) + "-$" + range[1].toFixed(0) + ")" : "");
+                wrap.appendChild(head);
+                for (const [label, items, risky] of [
+                    ["Best-value safe listings", result.best_listings, false],
+                    ["Flagged listings", result.flagged_listings, true],
+                ]) {
+                    if (!items.length) continue;
+                    const group = document.createElement("div");
+                    group.className = "group" + (risky ? " risky" : "");
+                    group.textContent = label;
+                    const cards = document.createElement("div");
+                    cards.className = "cards";
+                    for (const item of items) cards.appendChild(merchCard(item, risky));
+                    wrap.append(group, cards);
+                }
+                messages.insertBefore(wrap, before);
+            }
+
             async function send() {
                 const text = userInput.value.trim();
                 if (!text) return;
@@ -426,6 +569,14 @@
                             addVenueMap(result, loading);
                         } catch (err) {
                             console.warn("venue map failed", err); // never block the answer
+                        }
+                    }
+                    for (const call of data.tool_calls || []) {
+                        if (!isMerchResult(call.result)) continue;
+                        try {
+                            addMerchCards(call.result, loading);
+                        } catch (err) {
+                            console.warn("merch cards failed", err);
                         }
                     }
                     loading.classList.remove("loading");

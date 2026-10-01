@@ -28,6 +28,7 @@ def item(title="IVE Wonyoung photocard official", price="14.00", currency="USD",
         "seller": {"feedbackPercentage": "99.8", "feedbackScore": 1520},
         "itemLocation": {"country": "KR"},
         "itemWebUrl": "https://www.ebay.com/itm/1",
+        "image": {"imageUrl": "https://i.ebayimg.com/images/g/abc/s-l225.jpg"},
     }
 
 
@@ -66,6 +67,7 @@ def test_search_returns_shaped_listings():
             "seller_feedback_count": 1520,
             "ships_from": "KR",
             "url": "https://www.ebay.com/itm/1",
+            "image_url": "https://i.ebayimg.com/images/g/abc/s-l225.jpg",
         }
     ]
     sent = calls["search"][0]
@@ -105,6 +107,19 @@ def test_shape_drops_other_currencies_and_tolerates_missing_fields():
     assert [listing["title"] for listing in listings] == ["No flat shipping"]
     assert listings[0]["shipping"] is None, "unknown shipping must not be reported as free"
     assert shape_listings({}) == []
+
+
+def test_image_falls_back_to_thumbnail_and_rejects_non_https():
+    thumb_only = item()
+    thumb_only.pop("image")
+    thumb_only["thumbnailImages"] = [{"imageUrl": "https://i.ebayimg.com/thumb.jpg"}]
+    plain_http = item()
+    plain_http["image"] = {"imageUrl": "http://example.com/x.jpg"}
+    no_image = item()
+    no_image.pop("image")
+
+    shaped = shape_listings({"itemSummaries": [thumb_only, plain_http, no_image]})
+    assert [listing["image_url"] for listing in shaped] == ["https://i.ebayimg.com/thumb.jpg", None, None]
 
 
 def test_missing_keys_raise_missing_credentials(monkeypatch):

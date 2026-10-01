@@ -109,6 +109,7 @@ def shape_listings(data: dict) -> list[dict]:
         shipping_options = item.get("shippingOptions") or [{}]
         shipping = (shipping_options[0] or {}).get("shippingCost") or {}
         seller = item.get("seller") or {}
+        image = (item.get("image") or {}).get("imageUrl") or ((item.get("thumbnailImages") or [{}])[0] or {}).get("imageUrl")
         listings.append(
             {
                 "title": str(item.get("title") or ""),
@@ -119,6 +120,7 @@ def shape_listings(data: dict) -> list[dict]:
                 "seller_feedback_count": seller.get("feedbackScore"),
                 "ships_from": (item.get("itemLocation") or {}).get("country"),
                 "url": item.get("itemWebUrl"),
+                "image_url": image if isinstance(image, str) and image.startswith("https://") else None,
             }
         )
     return listings

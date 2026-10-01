@@ -127,17 +127,25 @@ What a merch item is listed for on eBay US, and which listings look risky. The
 listings come from `tools/common/ebay.py`; the tool's own work is everything
 after that:
 
-1. Drop unofficial goods (`fanmade`, `lomo`, `reprint`, `replica`, ...) and
-   bundles or pick-your-member listings, counting each under `excluded`.
+1. Drop unofficial goods (`fanmade`, `lomo`, `reprint`, `replica`, ...),
+   bundles or pick-your-member listings, and titles that do not name the
+   query's first word (the group or member), counting each under `excluded`.
 2. Sort every title into a category (`photocard`, `album`, `lightstick`,
    `seasons_greetings`, `doll`, `concert_merch`) and a condition (`sealed` /
    `opened` / `opened_no_photocard` for albums, `working` / `not_working` for
    lightsticks, else `new` / `used`), and keep only the query's category and
    condition. When the query names no condition, the most common one is used.
+   Variants that share the item's words are dropped unless the query asks for
+   them: keyring and mini replicas of a lightstick, CD-player (CDP) / LP /
+   vinyl / cassette editions of an album, photocard holders and sleeves.
 3. Add shipping to the price, leave signed items and weak sellers (under 97%
    positive or under 10 ratings) out of the price, and drop outliers beyond
    1.5 x IQR.
 4. Flag anything under 40% of the typical price as a possible fake.
+5. If the upper quartile is 3.5x the lower one or more, the listings are
+   different editions: `mixed_versions: true`, `typical_price_usd: null`, no
+   verdict, no "far below" flags, and a `mixed_versions_note` telling the model
+   to ask which edition the user means.
 
 ```json
 {
@@ -151,6 +159,19 @@ after that:
   "target_price_usd": 30, "verdict": "overpriced"
 }
 ```
+
+Every card in `best_listings` / `flagged_listings` carries the listing's
+`image_url` (eBay's own thumbnail on i.ebayimg.com). The model does not use it:
+`index.html` draws the cards with their photos above the answer, linking each
+to the eBay listing, and accepts only `https://i.ebayimg.com/` images and
+`https://www.ebay.com/` links. The model cannot see the photos, so the prompt
+forbids judging authenticity from them.
+
+Measured on live eBay (October 2026): "aespa Armageddon album sealed" mixed a
+$14 regular edition with $235-$420 CDP editions, giving a "typical" $235 and
+flagging regular albums as fakes; "SEVENTEEN lightstick ver 3" counted $30
+keyring replicas and an ATEEZ lightstick. The variant, artist and
+mixed-editions rules above come from those two queries.
 
 `verdict` appears only with `target_price`: `good_deal` at or under 85% of the
 typical price, `fair` up to 115%, else `overpriced`. Fewer than 3 comparable

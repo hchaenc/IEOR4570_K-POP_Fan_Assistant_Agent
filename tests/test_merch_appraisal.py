@@ -11,7 +11,7 @@ from tools import TOOL_MAP, TOOLS, run_tool
 from tools.originals.merch_appraisal.tool import categorize, condition_of
 
 
-def listing(title, price, shipping=0.0, feedback_pct=99.5, feedback_count=500, ships_from="US", condition="New"):
+def listing(title, price, shipping=0.0, feedback_pct=99.5, feedback_count=500, ships_from="US", condition="New", image_url=None):
     return {
         "title": title,
         "price": price,
@@ -21,6 +21,7 @@ def listing(title, price, shipping=0.0, feedback_pct=99.5, feedback_count=500, s
         "seller_feedback_count": feedback_count,
         "ships_from": ships_from,
         "url": "https://www.ebay.com/itm/sample",
+        "image_url": image_url,
     }
 
 
@@ -106,12 +107,24 @@ def test_appraisal_filters_junk_and_prices_like_with_like(monkeypatch):
     assert client.queries == ["IVE Wonyoung photocard"]
     assert result["ok"] is True and result["source"] == "ebay"
     assert result["category"] == "photocard" and result["condition"] == "new"
-    assert result["excluded"] == {"unofficial": 2, "bundle_or_multi_choice": 1, "other_category": 0}
+    assert result["excluded"] == {
+        "unofficial": 2, "bundle_or_multi_choice": 1, "other_category": 0,
+        "other_variant_or_accessory": 0, "other_artist": 0,
+    }
     # 8 clean totals: 5, 16.5, 18, 21, 21.5, 24.99, 29, 58 -> 58 is an outlier.
     assert result["listings_compared"] == 7
     assert result["typical_price_usd"] == 21.0
     assert "Not sold prices" in result["note"]
     assert "verdict" not in result
+
+
+def test_listing_cards_carry_the_photo_for_the_page(monkeypatch):
+    listings = sample_listings()
+    listings[1]["image_url"] = "https://i.ebayimg.com/images/g/x/s-l225.jpg"
+    use_listings(monkeypatch, listings)
+    best = appraise(query="IVE Wonyoung photocard")["best_listings"]
+    assert best[0]["image_url"] == "https://i.ebayimg.com/images/g/x/s-l225.jpg"
+    assert "image_url" in best[1] and best[1]["image_url"] is None
 
 
 def test_best_listings_are_the_cheapest_safe_ones(monkeypatch):
@@ -127,8 +140,16 @@ def test_risky_listings_are_flagged_with_a_reason(monkeypatch):
     flagged = {item["total_usd"]: " ".join(item["why"]) for item in appraise(query="IVE Wonyoung photocard")["flagged_listings"]}
 
     assert "far below the typical price" in flagged[5.0]
-    assert "91.0% positive feedback over 3 ratings" in flagged[6.0]
+    assert "only 91% positive feedback (3 ratings)" in flagged[6.0]
     assert "signed item" in flagged[130.0]
+
+
+def test_a_perfect_but_brand_new_seller_is_called_new_not_badly_rated(monkeypatch):
+    listings = sample_listings()
+    listings.append(listing("IVE Wonyoung photocard official", 19.0, 0.0, 100.0, 4))
+    use_listings(monkeypatch, listings)
+    flagged = {item["total_usd"]: item["why"] for item in appraise(query="IVE Wonyoung photocard")["flagged_listings"]}
+    assert flagged[19.0] == ["new seller: only 4 ratings"]
 
 
 def test_target_price_gets_a_verdict(monkeypatch):
@@ -179,7 +200,10 @@ def test_too_few_comparables_refuses_to_price(monkeypatch):
     result = appraise(query="IVE Wonyoung photocard")
 
     assert result["ok"] is False and result["error"] == "too_few_comparables"
-    assert result["excluded"] == {"unofficial": 2, "bundle_or_multi_choice": 1, "other_category": 0}
+    assert result["excluded"] == {
+        "unofficial": 2, "bundle_or_multi_choice": 1, "other_category": 0,
+        "other_variant_or_accessory": 0, "other_artist": 0,
+    }
     assert "typical_price_usd" not in result
 
 
@@ -207,3 +231,49 @@ def test_non_numeric_target_price_is_ignored(monkeypatch):
     use_listings(monkeypatch, sample_listings())
     result = appraise(query="IVE Wonyoung photocard", target_price="cheap")
     assert result["ok"] is True and "verdict" not in result
+
+
+# --- real-data corrections ---------------------------------------------------------
+
+
+def test_lightstick_keyrings_and_other_artists_are_not_compared(monkeypatch):
+    """Real eBay results for 'SEVENTEEN lightstick ver 3' included keyring
+    replicas at ~$30 and an ATEEZ lightstick."""
+    listings = [listing(f"SEVENTEEN Official Light Stick Ver.3 #{i}", 60.0 + i) for i in range(4)]
+    listings += [
+        listing("SEVENTEEN Official Light Stick Ver.3 10th Anniv. Keyring", 33.5),
+        listing("Seventeen Ver.3 Mini Light Stick Keychain Multi-Color LED", 29.98),
+        listing("ATEEZ Official Light Stick Ver.3 for KPOP Concert", 65.99),
+    ]
+    use_listings(monkeypatch, listings)
+    result = appraise(query="SEVENTEEN lightstick ver 3")
+
+    assert result["listings_compared"] == 4
+    assert result["excluded"]["other_variant_or_accessory"] == 2
+    assert result["excluded"]["other_artist"] == 1
+    assert all("Keyring" not in item["title"] and "ATEEZ" not in item["title"] for item in result["best_listings"])
+
+
+def test_a_query_for_the_variant_keeps_only_that_variant(monkeypatch):
+    listings = [listing(f"aespa Armageddon CDP Ver CD Player sealed #{i}", 250.0 + 10 * i) for i in range(4)]
+    listings += [listing(f"aespa Armageddon Poster Ver sealed #{i}", 20.0 + i) for i in range(4)]
+    use_listings(monkeypatch, listings)
+
+    cdp = appraise(query="aespa Armageddon CDP ver sealed")
+    assert cdp["listings_compared"] == 4 and cdp["typical_price_usd"] == 265.0
+    regular = appraise(query="aespa Armageddon album sealed")
+    assert regular["listings_compared"] == 4 and regular["typical_price_usd"] == 21.5
+
+
+def test_mixed_editions_get_no_typical_price_and_no_false_scam_flags(monkeypatch):
+    """Real case: sealed aespa Armageddon ran from a $14 MY Power ver to a $125
+    UK exclusive, so a median priced nothing and flagged the cheap edition as fake."""
+    prices = [13.99, 14.0, 19.4, 19.4, 28.5, 30.98, 34.99, 44.99, 59.99, 79.12, 111.08, 124.99]
+    use_listings(monkeypatch, [listing(f"aespa Armageddon album sealed #{i}", p) for i, p in enumerate(prices)])
+    result = appraise(query="aespa Armageddon album sealed", target_price=30)
+
+    assert result["ok"] is True and result["mixed_versions"] is True
+    assert result["typical_price_usd"] is None
+    assert "Ask the user which version" in result["mixed_versions_note"]
+    assert "verdict" not in result, "a verdict against a mixed median would be invented"
+    assert result["flagged_listings"] == []
