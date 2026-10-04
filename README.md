@@ -223,8 +223,8 @@ production.
 
 ## Team
 
-By commit history: Jiashu CHEN (merch appraisal, venue survival kit, chat
-page), lixiao-yang (Weverse notices, Ticketmaster, tool framework), Joy
+By commit history: Jiashu Chen (merch appraisal, venue survival kit, chat
+page), Lixiao Yang (Weverse notices, Ticketmaster, tool framework), Xinyi Wang
 (comeback trail, iTunes resolver).
 
 ## License
