@@ -17,8 +17,8 @@ Vertex AI.
 | "What aespa US tour dates are on sale, and when do tickets open?" | `weverse_notices` → `search_ticketmaster_events` |
 | "What exactly does the aespa presale notice say about who can join?" | `weverse_notices` (digest, then full text) |
 | "Is $60 a fair price for a SEVENTEEN lightstick ver 3?" | `appraise_kpop_merch` |
-| "I'm queueing overnight at KSPO Dome Seoul – what's around?" | `venue_survival_kit` |
-| "I like aespa's Licorice. Show me the comeback content." | `resolve_song_release` → `trace_kpop_comeback_era` |
+| "I'm queueing overnight at Capital One Arena in Washington D.C. – what's around?" | `venue_survival_kit` |
+| "I like LE SSERAFIM's Smart. Show me the comeback content." | `resolve_song_release` → `trace_kpop_comeback_era` |
 
 The chat page draws a map for venue answers and photo cards for merch answers,
 keeps several independent conversations in a sidebar, and lists each answer's
